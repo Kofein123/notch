@@ -16,6 +16,10 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
+[dependencies]
+# needed by the #[implement] macro, which expands to ::windows_core paths
+windows-core = "0.58"
+
 [dependencies.windows]
 version = "0.58"
 features = [
