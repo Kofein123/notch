@@ -13,8 +13,6 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
-    # skip until the UI entry point lands
-    if: ${{ hashFiles('src/main.rs') != '' }}
     steps:
       - uses: actions/checkout@v4
 
