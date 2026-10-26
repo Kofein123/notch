@@ -6,20 +6,35 @@ use crate::gfx::{self, Align, Gfx, R};
 use super::widgets::{self, Hits};
 use super::{Alert, AlertIcon, Hit, Hud};
 
-/// 250 x 32 peek.
+pub const HUD_W: f32 = 280.0;
+
+/// 280 x 32 peek. Short right-hand values ("RU", "ON", "18%") sit in a chip.
 pub fn draw_hud(g: &Gfx, h: &Hud) {
     let cy = 16.0;
     g.icon(h.icon, 24.0, cy, 13.0, h.color);
     match h.value {
         Some(v) => {
-            widgets::bar(g, 44.0, cy, 150.0, 4.0, v, gfx::WHITE);
-            g.text(&h.right, R::new(198.0, 0.0, 40.0, 32.0), 11.0, 600, h.right_color, Align::Right);
+            widgets::bar(g, 44.0, cy, 180.0, 4.0, v, gfx::WHITE);
+            g.text(&h.right, R::new(228.0, 0.0, 40.0, 32.0), 11.0, 600, h.right_color, Align::Right);
         }
         None => {
-            let tw = g.measure(&h.title, 12.0, 600);
-            g.text(&h.title, R::new(40.0, 0.0, tw.min(160.0) + 2.0, 32.0), 12.0, 600, gfx::WHITE, Align::Left);
-            let rx = 40.0 + tw.min(160.0) + 8.0;
-            g.text(&h.right, R::new(rx, 0.0, (238.0 - rx).max(0.0), 32.0), 11.0, 600, h.right_color, Align::Right);
+            let short = !h.right.is_empty() && h.right.chars().count() <= 4;
+            let (rw, rx) = if short {
+                let w = g.measure(&h.right, 11.0, 700) + 16.0;
+                (w, HUD_W - 12.0 - w)
+            } else {
+                let w = g.measure(&h.right, 11.0, 600).min(120.0);
+                (w, HUD_W - 14.0 - w)
+            };
+            let tw = (rx - 8.0 - 42.0).max(40.0);
+            g.text(&h.title, R::new(42.0, 0.0, tw, 32.0), 12.0, 600, gfx::WHITE, Align::Left);
+            if short {
+                let r = R::new(rx, 6.0, rw, 20.0);
+                g.rrect(r, 6.0, gfx::CHIP_HI);
+                g.text(&h.right, r, 11.0, 700, h.right_color, Align::Center);
+            } else {
+                g.text(&h.right, R::new(rx, 0.0, rw + 2.0, 32.0), 11.0, 600, h.right_color, Align::Right);
+            }
         }
     }
 }

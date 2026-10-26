@@ -223,6 +223,39 @@ pub fn input_language() -> String {
     }
 }
 
+/// Full English name of the foreground keyboard layout ("Russian (Russia)").
+pub fn input_language_name() -> String {
+    unsafe {
+        let fg = GetForegroundWindow();
+        let tid = GetWindowThreadProcessId(fg, None);
+        let hkl = GetKeyboardLayout(tid);
+        let langid = (hkl.0 as usize & 0xffff) as u32;
+        let mut buf = [0u16; 85];
+        let n = LCIDToLocaleName(langid, Some(&mut buf), 0);
+        if n <= 1 {
+            return String::new();
+        }
+        let mut out = [0u16; 128];
+        let m = GetLocaleInfoEx(PCWSTR(buf.as_ptr()), LOCALE_SENGLISHDISPLAYNAME, Some(&mut out));
+        if m > 1 {
+            String::from_utf16_lossy(&out[..m as usize - 1])
+        } else {
+            String::from_utf16_lossy(&buf[..n as usize - 1])
+        }
+    }
+}
+
+/// Milliseconds since the last keyboard / mouse input anywhere.
+pub fn idle_ms() -> u32 {
+    unsafe {
+        let mut li = LASTINPUTINFO { cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
+        if !GetLastInputInfo(&mut li).as_bool() {
+            return 0;
+        }
+        windows::Win32::System::SystemInformation::GetTickCount().wrapping_sub(li.dwTime)
+    }
+}
+
 // ------------------------------------------------------------------ network
 
 #[derive(Clone, Debug, PartialEq)]

@@ -70,6 +70,7 @@ pub const T_NET: usize = 16;
 pub const T_COPIED: usize = 17;
 pub const T_LANG: usize = 18;
 pub const T_BLINK: usize = 19;
+pub const T_PET: usize = 20;
 
 // ------------------------------------------------------------------ types
 
@@ -244,6 +245,12 @@ pub struct App {
     set_cat: usize,
     auto_hide: bool,
     body: Fade,
+    pet: bool,
+    pet_x: Spring,
+    pet_y: Spring,
+    pet_fade: Fade,
+    pet_happy: Option<Instant>,
+    rng: u32,
     vol_mode: bool,
     seek_preview: Option<f64>,
     audio: sys::Audio,
@@ -339,6 +346,12 @@ impl App {
             set_cat: 0,
             auto_hide: false,
             body: Fade::new(1.0, 6.0),
+            pet: false,
+            pet_x: Spring::new(0.0, 60.0, 0.25),
+            pet_y: Spring::new(0.0, 60.0, 0.25),
+            pet_fade: Fade::new(0.0, 2.5),
+            pet_happy: None,
+            rng: (Instant::now().elapsed().subsec_nanos() ^ 0x9e37_79b9) | 1,
             vol_mode: false,
             seek_preview: None,
             audio: sys::Audio::new(),
@@ -495,7 +508,7 @@ impl App {
         match l {
             Layer::Alert => (380.0, 78.0, 26.0),
             Layer::Expanded => (if self.wide_target() { 520.0 } else { 420.0 }, 140.0, 30.0),
-            Layer::Hud => (250.0, 32.0, 14.0),
+            Layer::Hud => (hud::HUD_W, 32.0, 14.0),
             Layer::Ghost => (200.0, 8.0, 4.0),
             Layer::Settings => (settings::W, settings::H, 30.0),
             Layer::Pill => {
@@ -532,7 +545,8 @@ impl App {
         if self.content_changing() {
             self.page_fade.target = 0.0;
         }
-        let moving = self.body.v != self.body.target || self.lyr.moving() || self.content_changing() || self.sw.moving() || self.sh.moving() || self.sr.moving() || self.fade.v != self.fade.target || self.page_fade.v != self.page_fade.target || want != self.layer;
+        self.pet_fade.target = if self.pet_visible() { 1.0 } else { 0.0 };
+        let moving = self.pet_fade.v != self.pet_fade.target || self.pet_x.moving() || self.pet_y.moving() || self.body.v != self.body.target || self.lyr.moving() || self.content_changing() || self.sw.moving() || self.sh.moving() || self.sr.moving() || self.fade.v != self.fade.target || self.page_fade.v != self.page_fade.target || want != self.layer;
         if moving && !self.anim_on {
             self.anim_on = true;
             self.last_anim = Instant::now();
@@ -555,6 +569,10 @@ impl App {
         let want = self.desired_layer();
         self.body.target = if want == Layer::Ghost { 0.0 } else { 1.0 };
         moving |= self.body.step(dt);
+        self.pet_fade.target = if self.pet_visible() { 1.0 } else { 0.0 };
+        moving |= self.pet_fade.step(dt);
+        moving |= self.pet_x.step(dt);
+        moving |= self.pet_y.step(dt);
         if want != self.layer {
             self.fade.target = 0.0;
             // swap once the old layer has faded and the shape is mostly there
@@ -734,6 +752,11 @@ impl App {
         g.alpha = 1.0;
         // auto-hidden: practically invisible, but alpha > 0 still catches the hover
         g.notch(CX, w, h, r, EAR, gfx::BLACK.a(self.body.v.max(2.0 / 255.0)));
+        if self.layer == Layer::Pill && self.pet_fade.v > 0.0 {
+            g.alpha = crate::anim::ease_out(self.fade.v) * self.pet_fade.v;
+            g.notch_glow(CX, w, h, r, EAR, gfx::Color::hex(0x2ec8ff), gfx::Color::hex(0x8a5cff));
+            g.alpha = 1.0;
+        }
         if let Some(tint) = self.art_tint {
             let fade = crate::anim::ease_out(self.fade.v);
             if self.layer == Layer::Expanded && self.wide_shown && self.page_shown == P_MUSIC {
@@ -789,9 +812,40 @@ impl App {
         self.started.elapsed().as_secs_f32()
     }
 
-    fn draw_pill(&self, g: &Gfx, w: f32) {
+    fn pet_visible(&self) -> bool {
+        self.pet || self.pet_happy.map_or(false, |t| Instant::now() < t)
+    }
+
+    fn draw_pet(&self, g: &Gfx, w: f32, h: f32) {
+        let cx = w / 2.0 + self.pet_x.v;
+        let cy = h / 2.0 + self.pet_y.v;
+        let happy = self.pet_happy.map_or(false, |t| Instant::now() < t);
+        for dx in [-8.0f32, 8.0] {
+            let ex = cx + dx;
+            if happy {
+                g.line(ex - 4.0, cy + 2.0, ex, cy - 2.5, 2.2, gfx::WHITE);
+                g.line(ex, cy - 2.5, ex + 4.0, cy + 2.0, 2.2, gfx::WHITE);
+            } else {
+                let eh = if self.blink { 2.0 } else { 12.0 };
+                g.rrect(R::new(ex - 4.5, cy - eh / 2.0 - 1.5, 9.0, eh + 3.0), 4.5, gfx::WHITE.a(0.22));
+                g.rrect(R::new(ex - 3.0, cy - eh / 2.0, 6.0, eh), 3.0, gfx::WHITE);
+            }
+        }
+    }
+
+    fn draw_pill(&self, g: &mut Gfx, w: f32) {
         let (_, h) = self.pill_size();
         let cy = h / 2.0;
+        if self.pet_fade.v > 0.0 {
+            let base = g.alpha;
+            g.alpha = base * self.pet_fade.v;
+            self.draw_pet(g, w, h);
+            g.alpha = base * (1.0 - self.pet_fade.v);
+            if g.alpha <= 0.01 {
+                g.alpha = base;
+                return;
+            }
+        }
         // left: artwork while playing, otherwise the battery ring
         if self.m.playing && self.art.is_some() {
             if let Some(bmp) = &self.art {
@@ -1351,8 +1405,9 @@ impl App {
         if !l.is_empty() && l != self.last_lang {
             self.last_lang = l.clone();
             if self.s.hud_language {
+                let name = sys::input_language_name();
                 self.show_hud(
-                    Hud { icon: '\u{E774}', color: gfx::WHITE, title: "Input".into(), value: None, right: l, right_color: gfx::WHITE },
+                    Hud { icon: '\u{E774}', color: gfx::WHITE, title: if name.is_empty() { l.clone() } else { name }, value: None, right: l, right_color: gfx::WHITE },
                     1400,
                 );
             }
@@ -1578,6 +1633,12 @@ impl App {
                 self.copied = None;
                 self.draw();
             }
+            T_PET => {
+                unsafe {
+                    let _ = KillTimer(self.hwnd, T_PET);
+                }
+                self.kick();
+            }
             T_BLINK => {
                 unsafe {
                     let _ = KillTimer(self.hwnd, T_BLINK);
@@ -1626,12 +1687,65 @@ impl App {
             );
         }
         self.check_language();
+        self.update_pet();
         if self.s.mascot && !self.expanded && !self.m.playing && self.ticks % 4 == 0 && self.layer == Layer::Pill {
             self.blink = true;
             self.draw();
             unsafe {
                 SetTimer(self.hwnd, T_BLINK, 140, None);
             }
+        }
+    }
+
+    fn rand(&mut self) -> u32 {
+        let mut x = self.rng;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.rng = x;
+        x
+    }
+
+    /// The idle pet: after 45 s without input the pill turns into a pair of
+    /// wandering eyes; it waves (^^) when you come back.
+    fn update_pet(&mut self) {
+        let can = self.s.mascot
+            && !self.m.playing
+            && !self.pomo.running
+            && !self.expanded
+            && !self.settings_open
+            && self.alerts.is_empty()
+            && self.hud.is_none()
+            && !self.auto_hide;
+        let want = can && sys::idle_ms() >= 45_000;
+        if want != self.pet {
+            self.pet = want;
+            if want {
+                self.pet_x.snap(0.0);
+                self.pet_y.snap(0.0);
+            } else if can {
+                self.pet_happy = Some(Instant::now() + Duration::from_millis(1600));
+                unsafe {
+                    SetTimer(self.hwnd, T_PET, 1650, None);
+                }
+            }
+            self.kick();
+            return;
+        }
+        if self.pet && self.ticks % 2 == 0 {
+            let r = self.rand();
+            if r % 10 == 0 {
+                // a little happy moment
+                self.pet_happy = Some(Instant::now() + Duration::from_millis(1200));
+                unsafe {
+                    SetTimer(self.hwnd, T_PET, 1250, None);
+                }
+            }
+            let x = (self.rand() % 81) as f32 - 40.0;
+            let y = (self.rand() % 7) as f32 - 3.0;
+            self.pet_x.set(x);
+            self.pet_y.set(y);
+            self.kick();
         }
     }
 

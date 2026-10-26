@@ -442,6 +442,32 @@ impl Gfx {
         }
     }
 
+    /// Pet glow: a horizontal `c0` -> `c1` gradient rising from the bottom
+    /// edge, fading into black towards the top.
+    pub fn notch_glow(&self, cx: f32, w: f32, h: f32, r: f32, ear: f32, c0: Color, c1: Color) {
+        let Some(path) = self.notch_path(cx, w, h, r, ear) else { return };
+        let a = self.alpha;
+        unsafe {
+            let stops = [
+                D2D1_GRADIENT_STOP { position: 0.0, color: col(c0.a(a)) },
+                D2D1_GRADIENT_STOP { position: 1.0, color: col(c1.a(a)) },
+            ];
+            let Ok(coll) = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { return };
+            let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: pt(cx - w / 2.0, 0.0), endPoint: pt(cx + w / 2.0, 0.0) };
+            let Ok(brush) = self.rt.CreateLinearGradientBrush(&props, None, &coll) else { return };
+            self.rt.FillGeometry(&path, &brush, None);
+            let shade = [
+                D2D1_GRADIENT_STOP { position: 0.0, color: col(BLACK) },
+                D2D1_GRADIENT_STOP { position: 0.4, color: col(BLACK) },
+                D2D1_GRADIENT_STOP { position: 1.0, color: col(BLACK.a(0.0)) },
+            ];
+            let Ok(coll) = self.rt.CreateGradientStopCollection(&shade, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { return };
+            let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: pt(cx, 0.0), endPoint: pt(cx, h) };
+            let Ok(brush) = self.rt.CreateLinearGradientBrush(&props, None, &coll) else { return };
+            self.rt.FillGeometry(&path, &brush, None);
+        }
+    }
+
     /// Simple water drop (Segoe icon fonts don't have a good one).
     pub fn drop_icon(&self, cx: f32, cy: f32, size: f32, c: Color) {
         let h = size;
