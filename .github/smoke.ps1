@@ -24,7 +24,7 @@ if ($p.HasExited) {
     Write-Output "::error title=smoke::Notch.exe exited during startup (code $($p.ExitCode))"
     exit 1
 }
-$h = [Mouse]::FindWindow("NotchWindow", $null)
+$h = [Mouse]::FindWindow("NotchWindow", "Notch")
 if ($h -eq [IntPtr]::Zero) {
     Write-Output "::error title=smoke::NotchWindow not found"
     Stop-Process -Id $p.Id -Force
