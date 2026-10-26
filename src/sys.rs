@@ -206,12 +206,28 @@ unsafe extern "system" fn kb_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
     CallNextHookEx(None, code, wparam, lparam)
 }
 
+/// Keyboard layout of the thread that owns keyboard focus. Modern apps
+/// (Windows 11 Notepad, Terminal, UWP) keep focus on a child window owned by a
+/// different thread than the top-level one, so ask the GUI thread first.
+fn focused_hkl() -> HKL {
+    unsafe {
+        let fg = GetForegroundWindow();
+        let mut tid = GetWindowThreadProcessId(fg, None);
+        let mut gi = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+        if GetGUIThreadInfo(tid, &mut gi).is_ok() && !gi.hwndFocus.is_invalid() {
+            let t = GetWindowThreadProcessId(gi.hwndFocus, None);
+            if t != 0 {
+                tid = t;
+            }
+        }
+        GetKeyboardLayout(tid)
+    }
+}
+
 /// Two-letter code of the foreground window's keyboard layout ("EN", "RU", "KK"...).
 pub fn input_language() -> String {
     unsafe {
-        let fg = GetForegroundWindow();
-        let tid = GetWindowThreadProcessId(fg, None);
-        let hkl = GetKeyboardLayout(tid);
+        let hkl = focused_hkl();
         let langid = (hkl.0 as usize & 0xffff) as u32;
         let mut buf = [0u16; 85];
         let n = LCIDToLocaleName(langid, Some(&mut buf), 0);
@@ -226,9 +242,7 @@ pub fn input_language() -> String {
 /// Full English name of the foreground keyboard layout ("Russian (Russia)").
 pub fn input_language_name() -> String {
     unsafe {
-        let fg = GetForegroundWindow();
-        let tid = GetWindowThreadProcessId(fg, None);
-        let hkl = GetKeyboardLayout(tid);
+        let hkl = focused_hkl();
         let langid = (hkl.0 as usize & 0xffff) as u32;
         let mut buf = [0u16; 85];
         let n = LCIDToLocaleName(langid, Some(&mut buf), 0);

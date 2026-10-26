@@ -895,8 +895,6 @@ impl App {
         }
         g.alpha = base;
         self.draw_header(g, page);
-        g.icon('\u{E713}', 400.0, 19.0, 12.0, gfx::GRAY);
-        hits.add(R::new(386.0, 5.0, 28.0, 28.0), Hit::OpenSettings);
         g.alpha = base * crate::anim::ease_out(self.page_fade.v);
         let page_hits = self.page_fade.v > 0.5 && !self.content_changing();
         let on = hits.on;
@@ -959,10 +957,10 @@ impl App {
         // right: equalizer + bell (shelf uses the corner for "Clear all")
         if page != P_SHELF {
             if self.m.playing {
-                widgets::equalizer(g, 346.0, cy, true, self.t(), gfx::WHITE);
+                widgets::equalizer(g, 372.0, cy, true, self.t(), gfx::WHITE);
             }
             if self.s.notif_badge && self.notif > 0 {
-                widgets::bell(g, 328.0, cy, self.notif);
+                widgets::bell(g, 354.0, cy, self.notif);
             }
         }
     }
@@ -1102,6 +1100,8 @@ impl App {
                 None
             }
             Some(_) => Some(Deferred::Menu),
+            // hits are off while a layer cross-fades: still honour the island itself
+            None if self.island_rect().contains(x, y) => Some(Deferred::Menu),
             None => None,
         }
     }
@@ -1133,7 +1133,7 @@ impl App {
         // over the arrows, the page dots or the header row: the wheel flips pages
         let (x, y) = self.cursor_logical();
         let over_nav = matches!(self.find_hit(x, y), Some(Hit::PrevPage | Hit::NextPage | Hit::Page(_)))
-            || (y < 32.0 && self.island_rect().contains(x, y) && !self.wide_shown);
+            || (y < 32.0 && self.island_rect().contains(x, y));
         if over_nav && !self.editing() {
             if (self.wheel_acc > 0) != (delta > 0) {
                 self.wheel_acc = 0;

@@ -1,6 +1,6 @@
 [package]
 name = "notch"
-version = "0.1.0"
+version = "0.1.4"
 edition = "2021"
 description = "A living notch (dynamic island) for Windows - music, lyrics, focus, water, to-do, shelf and system HUDs."
 license = "MIT"

@@ -60,6 +60,7 @@ impl App {
         let next = match self.water_next() {
             Some(t) => format!("Next {}", store::hhmm(t)),
             None if taken >= goal => "Goal reached".into(),
+            None if !self.s.water_on => "Reminders off".into(),
             None => "No more reminders".into(),
         };
         let line = format!("Today · {}% · {}", (frac * 100.0).round() as i32, next);

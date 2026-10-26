@@ -188,6 +188,8 @@ impl App {
         let next_slot = ((now / 30) + 1) * 30;
         let Some(f) = self.add.as_mut() else { return };
         f.start = match f.start {
+            // no slot left today: keep "No time" instead of wrapping to 00:00
+            None if self.todo_day == 0 && next_slot >= 24 * 60 => None,
             None => Some(if self.todo_day == 0 { next_slot } else { 9 * 60 }),
             Some(m) if m + 30 >= 24 * 60 => None,
             Some(m) => Some(m + 30),
