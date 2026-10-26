@@ -1,6 +1,6 @@
 # Smoke test on the CI runner: start Notch.exe, make sure it stays alive,
 # hover it open, flip through the pages and post small screenshots as
-# annotations (base64 PNG) so the layout can be checked without a Windows box.
+# to the ci-shots branch so the layout can be checked without a Windows box.
 param([string]$Exe = "dist/Notch.exe")
 
 Add-Type -AssemblyName System.Drawing
@@ -38,14 +38,12 @@ $W = $r.R - $r.L
 $H = $r.B - $r.T
 $s = $W / 560.0
 
+New-Item -ItemType Directory -Force shots | Out-Null
 function Shot([string]$name, [int]$h) {
     $bmp = New-Object System.Drawing.Bitmap $W, $h
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size)
-    $ms = New-Object System.IO.MemoryStream
-    $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
-    $b64 = [Convert]::ToBase64String($ms.ToArray())
-    Write-Output "::notice title=shot-$name::$b64"
+    $bmp.Save((Join-Path (Get-Location) "shots/$name.png"), [System.Drawing.Imaging.ImageFormat]::Png)
     $g.Dispose(); $bmp.Dispose()
 }
 
