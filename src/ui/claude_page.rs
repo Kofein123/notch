@@ -73,7 +73,7 @@ impl App {
         let (title, tc, sub) = if !self.s.claude_on {
             ("Tracking is off", gfx::GRAY, "Turn it on in Settings → Claude".to_string())
         } else if closed {
-            ("Claude is closed", gfx::GRAY, "Open the Claude app to see when answers are ready".to_string())
+            ("Claude is closed", gfx::GRAY, "Open the Claude app to track answers".to_string())
         } else if working {
             let el = c.since.map(|t| fmt_dur(t.elapsed())).unwrap_or_default();
             ("Writing an answer…", ORANGE, format!("for {el}"))
