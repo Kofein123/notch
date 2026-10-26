@@ -115,10 +115,10 @@ Start-Sleep -Milliseconds 900
 IClick 400 19
 Start-Sleep -Milliseconds 900
 Shot "settings" ([int](335 * $s))
-IClick 70 112
+IClick 50 104
 Start-Sleep -Milliseconds 500
 Shot "settings-appearance" ([int](335 * $s))
-IClick 492 25
+IClick 442 25
 Start-Sleep -Milliseconds 700
 
 # leave, let it collapse, then Caps Lock HUD
