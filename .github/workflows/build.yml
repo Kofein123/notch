@@ -14,7 +14,52 @@ env:
   CARGO_TERM_COLOR: never
 
 jobs:
+  # TDLib (Telegram) is built once per pinned commit and cached; first build ~1 h.
+  tdlib:
+    runs-on: windows-latest
+    timeout-minutes: 300
+    env:
+      TD_COMMIT: ea3f69ce11aef458bfbb09869b809ede4447486f
+      TRIPLET: x64-windows-static-md
+    steps:
+      - name: Cache tdjson.dll
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: tdlib-out
+          key: tdjson-${{ env.TD_COMMIT }}-${{ env.TRIPLET }}-v1
+
+      - name: Build TDLib
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $vcpkg = $env:VCPKG_INSTALLATION_ROOT
+          git clone -q https://github.com/tdlib/td.git td
+          git -C td checkout -q $env:TD_COMMIT
+          & "$vcpkg\vcpkg.exe" install "gperf:$env:TRIPLET" "openssl:$env:TRIPLET" "zlib:$env:TRIPLET"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $gperf = Get-ChildItem -Recurse "$vcpkg\installed\$env:TRIPLET\tools" -Filter gperf.exe | Select-Object -First 1
+          New-Item -ItemType Directory -Force td/build | Out-Null
+          cmake -S td -B td/build -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$vcpkg/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET="$env:TRIPLET" `
+            -DGPERF_EXECUTABLE="$($gperf.FullName)"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          cmake --build td/build --target tdjson --config Release --parallel 4
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          New-Item -ItemType Directory -Force tdlib-out | Out-Null
+          Copy-Item td/build/Release/tdjson.dll tdlib-out/
+          (Get-Item tdlib-out/tdjson.dll).Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tdjson
+          path: tdlib-out/tdjson.dll
+
   windows:
+    needs: tdlib
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,18 +87,26 @@ jobs:
               print("::error title=build errors " + str(i // 3600) + "::" + s[i:i + 3600])
           PY
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: tdjson
+          path: tdjson
+
       - name: Collect artifact
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
+          New-Item -ItemType Directory -Force dist/Notch | Out-Null
           Copy-Item target/release/notch.exe dist/Notch.exe
-          (Get-Item dist/Notch.exe).Length
+          Copy-Item target/release/notch.exe dist/Notch/Notch.exe
+          Copy-Item tdjson/tdjson.dll dist/Notch/tdjson.dll
+          Compress-Archive -Path dist/Notch/* -DestinationPath dist/Notch-windows-x64.zip -Force
+          Get-ChildItem dist | Format-Table Name, Length
 
       - name: Smoke test (start, hover, page through)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         continue-on-error: true
         shell: pwsh
-        run: ./.github/smoke.ps1 -Exe dist/Notch.exe
+        run: ./.github/smoke.ps1 -Exe dist/Notch/Notch.exe
 
       - name: Upload smoke screenshots
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -67,10 +120,12 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Notch-windows-x64
-          path: dist/Notch.exe
+          path: dist/Notch/
 
       - name: Publish release (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/Notch.exe
+          files: |
+            dist/Notch-windows-x64.zip
+            dist/Notch.exe
