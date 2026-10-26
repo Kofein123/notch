@@ -1,6 +1,6 @@
 # Smoke test on the CI runner: start Notch.exe, make sure it stays alive,
-# hover it open, flip through the pages and post small screenshots as
-# to the ci-shots branch so the layout can be checked without a Windows box.
+# hover it open, flip through the pages and save small screenshots as
+# the smoke-screenshots artifact so the layout can be checked without a Windows box.
 param([string]$Exe = "dist/Notch.exe")
 
 Add-Type -AssemblyName System.Drawing
