@@ -396,10 +396,8 @@ impl Tg {
             s.history.clear();
             s.history_more = true;
             s.loading = true;
-            if let Some(c) = s.chats.get(&chat_id) {
-                if let Some(m) = &c.last {
-                    s.history.push(m.clone());
-                }
+            if let Some(m) = s.chats.get(&chat_id).and_then(|c| c.last.clone()) {
+                s.history.push(m);
             }
             prev
         };
