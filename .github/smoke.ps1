@@ -131,6 +131,14 @@ Shot "hud-caps" ([int](60 * $s))
 [Mouse]::Key(0x14)
 Start-Sleep -Milliseconds 2200
 
+Start-Sleep -Seconds 50
+Shot "pet" ([int](60 * $s))
+Start-Sleep -Milliseconds 2100
+Shot "pet2" ([int](60 * $s))
+[void][Mouse]::SetCursorPos(300, 600)
+Start-Sleep -Milliseconds 1500
+Shot "pet-wave" ([int](60 * $s))
+
 if ($p.HasExited) {
     Write-Output "::error title=smoke::Notch.exe crashed while interacting (code $($p.ExitCode))"
     exit 1
