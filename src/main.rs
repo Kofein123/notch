@@ -4,11 +4,14 @@
 //! Notch: a living notch (dynamic island) for Windows 10/11.
 
 mod anim;
+mod claude;
+mod downloads;
 mod gfx;
 mod media;
 mod shelf;
 mod store;
 mod sys;
+mod tg;
 mod ui;
 
 use std::cell::RefCell;
@@ -31,6 +34,7 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
+    static PENDING: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
@@ -241,14 +245,7 @@ fn apply_command(a: &mut App, id: usize) -> bool {
 }
 
 fn set_activatable(hwnd: HWND, on: bool) {
-    unsafe {
-        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let na = WS_EX_NOACTIVATE.0 as isize;
-        let new = if on { ex & !na } else { ex | na };
-        if new != ex {
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new);
-        }
-    }
+    sys::set_activatable(hwnd, on);
 }
 
 fn show_menu(hwnd: HWND) {
@@ -384,6 +381,32 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         ui::WM_NET => with_app(|a| a.on_net()).map(|_| LRESULT(0)),
         ui::WM_NOTIF => with_app(|a| a.on_notif(wp.0 as u32)).map(|_| LRESULT(0)),
         ui::WM_DRAG => with_app(|a| a.on_drag(wp.0)).map(|_| LRESULT(0)),
+        ui::WM_TG => with_app(|a| a.on_tg(wp.0)).map(|_| LRESULT(0)),
+        ui::WM_CLAUDE => with_app(|a| a.on_claude(wp.0)).map(|_| LRESULT(0)),
+        WM_COPYDATA => {
+            let cds = lp.0 as *const windows::Win32::System::DataExchange::COPYDATASTRUCT;
+            if !cds.is_null() && (*cds).dwData == downloads::COPYDATA_TAG && !(*cds).lpData.is_null() {
+                let bytes = std::slice::from_raw_parts((*cds).lpData as *const u8, (*cds).cbData as usize);
+                let text = String::from_utf8_lossy(bytes).into_owned();
+                // may arrive while the app is busy (menu, drag): retry shortly
+                if with_app(|a| a.on_download_msg(&text)).is_none() {
+                    PENDING.with(|p| p.borrow_mut().push(text));
+                    let _ = PostMessageW(hwnd, WM_APP + 99, WPARAM(0), LPARAM(0));
+                }
+                Some(LRESULT(1))
+            } else {
+                None
+            }
+        }
+        m if m == WM_APP + 99 => {
+            let list: Vec<String> = PENDING.with(|p| p.borrow_mut().drain(..).collect());
+            for t in list {
+                if with_app(|a| a.on_download_msg(&t)).is_none() {
+                    PENDING.with(|p| p.borrow_mut().push(t));
+                }
+            }
+            Some(LRESULT(0))
+        }
         ui::WM_TRAY => {
             match (lp.0 as u32) & 0xffff {
                 WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(hwnd),
@@ -415,6 +438,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
 // ------------------------------------------------------------------ entry point
 
 fn main() {
+    // launched by a browser as the downloads native-messaging host
+    if downloads::is_host_invocation() {
+        downloads::run_host();
+        return;
+    }
     unsafe {
         // single instance
         let mutex = CreateMutexW(None, TRUE, w!("Local\\Notch.SingleInstance"));

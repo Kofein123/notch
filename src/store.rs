@@ -124,6 +124,12 @@ pub struct Settings {
     pub notif_badge: bool,
     pub shelf_clear: bool,
     pub last_page: usize,
+    pub tg_popups: bool,
+    pub tg_preview: bool,
+    pub downloads_on: bool,
+    pub dl_popup: bool,
+    pub claude_on: bool,
+    pub claude_popup: bool,
 }
 
 impl Default for Settings {
@@ -164,6 +170,12 @@ impl Default for Settings {
             notif_badge: true,
             shelf_clear: false,
             last_page: 0,
+            tg_popups: true,
+            tg_preview: true,
+            downloads_on: true,
+            dl_popup: true,
+            claude_on: true,
+            claude_popup: true,
         }
     }
 }
@@ -191,6 +203,7 @@ kv_fields!(
     lyrics, lyrics_in_pill, lyrics_view, todo_start, todo_end, snooze, week_monday, focus, short_break, long_break,
     water_on, water_goal, water_bottle, water_glass, water_from, water_until, hud_volume, hud_brightness,
     hud_caps, hud_language, popup_battery, popup_wifi, popup_bluetooth, notif_badge, shelf_clear, last_page,
+    tg_popups, tg_preview, downloads_on, dl_popup, claude_on, claude_popup,
 );
 
 // ------------------------------------------------------------------ to-do

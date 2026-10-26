@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "Notch Downloads",
+  "version": "1.0",
+  "description": "Shows your browser downloads in the Notch island on Windows.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApmsBHj3IJTx06Hfg7r9jt6OZHsERJgxeXouJM5bMjtWQk5EC3VfvPU2R/dmttN1/nAloCoSfqBarJhVKx4p5ew2hKHknV0Mkx4dkLj/lRzYXSOLDAzqO5dUqFVSg3yD/I6vioZnwhHsyMVQcm6VbdXARcO4iY7KnqJ7IVu1NH6Po20oMSQEv9XPv43tm6DsSvXQlrnDKW0bOKFI4bRXfTQqlONMN5OmpieHIZs4AbKts7N13h3WVdUcjuwLkLtcyRA0V8p1rJpBqYynJaX83vk+SPoJktCtnFbdtWLfcTwwjnc9F0F1n/TZcFh6RSe5hYTPQ4PGFs4ePcdJlNXcRaQIDAQAB",
+  "permissions": ["downloads", "nativeMessaging", "alarms"],
+  "background": { "service_worker": "background.js" }
+}

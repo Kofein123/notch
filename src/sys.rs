@@ -543,3 +543,41 @@ pub fn copy_text(hwnd: HWND, text: &str) {
         let _ = CloseClipboard();
     }
 }
+
+/// Text on the clipboard, if any.
+pub fn clipboard_text(hwnd: HWND) -> Option<String> {
+    use windows::Win32::System::DataExchange::*;
+    use windows::Win32::System::Memory::*;
+    use windows::Win32::System::Ole::CF_UNICODETEXT;
+    unsafe {
+        OpenClipboard(hwnd).ok()?;
+        let mut out = None;
+        if let Ok(h) = GetClipboardData(CF_UNICODETEXT.0 as u32) {
+            let g = HGLOBAL(h.0);
+            let p = GlobalLock(g) as *const u16;
+            if !p.is_null() {
+                let mut n = 0usize;
+                while *p.add(n) != 0 && n < 1 << 20 {
+                    n += 1;
+                }
+                out = Some(String::from_utf16_lossy(std::slice::from_raw_parts(p, n)));
+                let _ = GlobalUnlock(g);
+            }
+        }
+        let _ = CloseClipboard();
+        out
+    }
+}
+
+/// Lets the island take keyboard focus (while typing) or keeps it from
+/// ever activating (normal state).
+pub fn set_activatable(hwnd: HWND, on: bool) {
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let na = WS_EX_NOACTIVATE.0 as isize;
+        let new = if on { ex & !na } else { ex | na };
+        if new != ex {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new);
+        }
+    }
+}

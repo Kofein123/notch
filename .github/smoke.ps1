@@ -17,6 +17,7 @@ public static class Mouse {
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
     public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(2, 0, 0, 0, UIntPtr.Zero); mouse_event(4, 0, 0, 0, UIntPtr.Zero); }
+    public static void Wheel(int d) { mouse_event(0x0800, 0, 0, unchecked((uint)d), UIntPtr.Zero); }
 }
 "@
 
@@ -66,11 +67,14 @@ Start-Sleep -Milliseconds 300
 Start-Sleep -Milliseconds 1200
 Shot "page0" ([int](150 * $s))
 
-# next-page arrow at island x 398, y 70 (island left = canvas 70)
-for ($i = 1; $i -le 4; $i++) {
-    [Mouse]::Click($r.L + [int]((70 + 398) * $s), $r.T + [int](70 * $s))
+# the wheel over the header row flips pages: 1 Telegram, 2 Claude, 3 Pomodoro,
+# 4 Water, 5 Shelf, 6 To-do
+$hy = $r.T + [int](10 * $s)
+for ($i = 1; $i -le 6; $i++) {
+    [void][Mouse]::SetCursorPos($cx, $hy)
+    [Mouse]::Wheel(-120)
     Start-Sleep -Milliseconds 900
-    Shot "page$i" ([int](150 * $s))
+    Shot "page$i" ([int](240 * $s))
 }
 
 function IClick([double]$x, [double]$y) {
@@ -89,19 +93,19 @@ Shot "todo-add" ([int](150 * $s))
 Start-Sleep -Milliseconds 500
 Shot "todo-saved" ([int](150 * $s))
 
-# pomodoro: go to page 1 and press play
-IClick 32 70
-Start-Sleep -Milliseconds 300
-IClick 32 70
-Start-Sleep -Milliseconds 300
-IClick 32 70
-Start-Sleep -Milliseconds 700
+# pomodoro: three pages back, press play
+for ($i = 0; $i -lt 3; $i++) {
+    [void][Mouse]::SetCursorPos($cx, $hy)
+    [Mouse]::Wheel(120)
+    Start-Sleep -Milliseconds 700
+}
 IClick 265 109
 Start-Sleep -Milliseconds 1600
 Shot "pomo-running" ([int](150 * $s))
 
-# water: drink twice -> bottle (500 ml) empty -> refill alert
-IClick 398 70
+# water: next page, drink twice -> bottle (500 ml) empty -> refill alert
+[void][Mouse]::SetCursorPos($cx, $hy)
+[Mouse]::Wheel(-120)
 Start-Sleep -Milliseconds 700
 IClick 86 109
 Start-Sleep -Milliseconds 200
@@ -120,6 +124,36 @@ Start-Sleep -Milliseconds 450
 Shot "hud-caps" ([int](60 * $s))
 [Mouse]::Key(0x14)
 Start-Sleep -Milliseconds 2200
+
+# downloads: play the browser extension through the native host
+function Frame([string]$json) {
+    $b = [System.Text.Encoding]::UTF8.GetBytes($json)
+    return [byte[]]([BitConverter]::GetBytes([int]$b.Length) + $b)
+}
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = (Resolve-Path $Exe).Path
+$psi.Arguments = "chrome-extension://pbhgikiagdfeejahlihhdgcbhcaklkih/"
+$psi.UseShellExecute = $false
+$psi.RedirectStandardInput = $true
+$host_p = [System.Diagnostics.Process]::Start($psi)
+$in = $host_p.StandardInput.BaseStream
+$file = Join-Path $env:RUNNER_TEMP "ubuntu-24.04-desktop-amd64.iso"
+Set-Content -Path $file -Value "x"
+$fj = ($file | ConvertTo-Json)
+foreach ($m in @(
+    '{"type":"hello","version":"1.0"}',
+    ('{"type":"created","item":{"id":7,"file":' + $fj + ',"url":"https://example.com/a.iso","state":"in_progress","received":0,"total":6000000000}}'),
+    ('{"type":"progress","items":[{"id":7,"file":' + $fj + ',"url":"","state":"in_progress","received":2500000000,"total":6000000000}]}')
+)) { $f = Frame $m; $in.Write($f, 0, $f.Length); $in.Flush(); Start-Sleep -Milliseconds 400 }
+Start-Sleep -Milliseconds 900
+Shot "dl-progress" ([int](60 * $s))
+$f = Frame ('{"type":"complete","item":{"id":7,"file":' + $fj + ',"url":"","state":"complete","received":6000000000,"total":6000000000}}')
+$in.Write($f, 0, $f.Length); $in.Flush()
+Start-Sleep -Milliseconds 1200
+Shot "dl-done" ([int](100 * $s))
+$in.Close()
+Start-Sleep -Milliseconds 500
+if (-not $host_p.HasExited) { Write-Output "::warning title=smoke::native host did not exit on EOF"; $host_p.Kill() }
 
 if ($p.HasExited) {
     Write-Output "::error title=smoke::Notch.exe crashed while interacting (code $($p.ExitCode))"

@@ -1,7 +1,9 @@
 //! The island: state, layers, springs, hit-testing and timers. Pages live in
 //! their own files and only paint + react to hits.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::*;
@@ -10,17 +12,22 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::anim::{Fade, Spring};
+use crate::claude;
+use crate::downloads::{self, Downloads};
 use crate::gfx::{self, Align, Color, Gfx, R};
 use crate::media::{self, MediaInfo};
 use crate::shelf;
 use crate::store::{self, Settings, ShelfItem, Task};
 use crate::sys;
+use crate::tg;
 
+pub mod claude_page;
 mod hud;
 mod media_page;
 mod pomodoro;
 pub mod settings;
 mod shelf_page;
+pub mod telegram;
 mod todo;
 mod water;
 mod widgets;
@@ -37,12 +44,14 @@ pub const CH: f32 = 340.0;
 pub const CX: f32 = CW / 2.0;
 pub const EAR: f32 = 9.0;
 
-pub const PAGES: usize = 5;
+pub const PAGES: usize = 7;
 pub const P_MUSIC: usize = 0;
-pub const P_POMO: usize = 1;
-pub const P_WATER: usize = 2;
-pub const P_SHELF: usize = 3;
-pub const P_TODO: usize = 4;
+pub const P_TG: usize = 1;
+pub const P_CLAUDE: usize = 2;
+pub const P_POMO: usize = 3;
+pub const P_WATER: usize = 4;
+pub const P_SHELF: usize = 5;
+pub const P_TODO: usize = 6;
 
 // ------------------------------------------------------------------ messages / timers
 
@@ -52,6 +61,8 @@ pub const WM_NET: u32 = WM_APP + 3;
 pub const WM_NOTIF: u32 = WM_APP + 4;
 pub const WM_DRAG: u32 = WM_APP + 5;
 pub const WM_TRAY: u32 = WM_APP + 6;
+pub const WM_TG: u32 = WM_APP + 7;
+pub const WM_CLAUDE: u32 = WM_APP + 8;
 
 pub const T_CLOCK: usize = 1;
 pub const T_BG: usize = 3;
@@ -71,6 +82,8 @@ pub const T_COPIED: usize = 17;
 pub const T_LANG: usize = 18;
 pub const T_BLINK: usize = 19;
 pub const T_PET: usize = 20;
+pub const T_PEEK: usize = 21;
+pub const T_SPIN: usize = 22;
 
 // ------------------------------------------------------------------ types
 
@@ -81,6 +94,7 @@ pub enum Layer {
     Pill,
     Expanded,
     Hud,
+    Peek,
     Alert,
 }
 
@@ -137,6 +151,19 @@ pub enum Hit {
     SetToggle(u8),
     SetChoice(settings::Field, i32),
     SetStep(settings::Field, i8),
+    SetAction(u8),
+    // telegram
+    TgInput,
+    TgSubmit,
+    TgOpenSite,
+    TgResetKeys,
+    TgChat(i64),
+    TgBack,
+    TgSend,
+    TgPeek,
+    TgPeekReply,
+    // claude
+    ClaudeOpen,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -148,6 +175,9 @@ pub enum Act {
     WaterDrank,
     WaterSnooze,
     WaterRefilled,
+    OpenFile(String),
+    ShowInFolder(String),
+    OpenClaude,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -282,6 +312,12 @@ pub struct App {
     todo_scroll: usize,
     add: Option<AddForm>,
     caret_on: bool,
+
+    // telegram, claude, downloads
+    pub tgu: telegram::TgUi,
+    claude: claude_page::ClaudeUi,
+    claude_enabled: Arc<AtomicBool>,
+    dl: Downloads,
 }
 
 fn now_ms_to_next_minute() -> u32 {
@@ -300,6 +336,10 @@ impl App {
         sys::watch_network(hwnd, WM_NET);
         sys::watch_notifications(hwnd, WM_NOTIF);
         let inbox = shelf::register(hwnd, WM_DRAG);
+        downloads::register();
+        let claude_enabled = Arc::new(AtomicBool::new(s.claude_on));
+        claude::spawn(hwnd, WM_CLAUDE, claude_enabled.clone());
+        let tgu = telegram::TgUi::new(tg::Tg::start(hwnd, WM_TG));
         if s.autostart {
             sys::set_autostart(true);
         }
@@ -379,6 +419,10 @@ impl App {
             todo_scroll: 0,
             add: None,
             caret_on: true,
+            tgu,
+            claude: claude_page::ClaudeUi { state: claude::ST_CLOSED, ..Default::default() },
+            claude_enabled,
+            dl: Downloads::default(),
             s,
         };
         app.apply_speed();
@@ -468,6 +512,8 @@ impl App {
             Layer::Settings
         } else if self.expanded {
             Layer::Expanded
+        } else if self.tgu.peek.is_some() {
+            Layer::Peek
         } else if self.hud.is_some() {
             Layer::Hud
         } else if self.auto_hide && self.pill_lyric().is_none() {
@@ -489,7 +535,14 @@ impl App {
         }
     }
 
+    fn pill_download(&self) -> bool {
+        self.s.downloads_on && !self.dl.active().is_empty()
+    }
+
     fn pill_size(&self) -> (f32, f32) {
+        if self.pill_download() {
+            return (if self.s.minimal { 240.0 } else { 300.0 }, if self.s.minimal { 26.0 } else { 30.0 });
+        }
         if self.s.minimal {
             let w = if self.pomo.running { 150.0 } else { 128.0 };
             return (w, 26.0);
@@ -507,7 +560,11 @@ impl App {
     fn layer_size(&self, l: Layer) -> (f32, f32, f32) {
         match l {
             Layer::Alert => (380.0, 78.0, 26.0),
-            Layer::Expanded => (if self.wide_target() { 520.0 } else { 420.0 }, 140.0, 30.0),
+            Layer::Expanded => {
+                let (w, h) = expanded_size(self.page, self.wide_target());
+                (w, h, 30.0)
+            }
+            Layer::Peek => (telegram::PEEK_W, self.peek_height(), 24.0),
             Layer::Hud => (hud::HUD_W, 32.0, 14.0),
             Layer::Ghost => (200.0, 8.0, 4.0),
             Layer::Settings => (settings::W, settings::H, 30.0),
@@ -611,6 +668,12 @@ impl App {
         }
         self.expanded = true;
         self.hud = None;
+        if self.page == P_TG {
+            if let Some(id) = self.tgu.open {
+                self.tgu.client.set_visible_chat(Some(id));
+                self.tgu.client.mark_read(id);
+            }
+        }
         self.kick();
     }
 
@@ -622,6 +685,8 @@ impl App {
         self.vol_mode = false;
         self.water_settings = false;
         self.todo_edit = false;
+        self.drop_focus();
+        self.tgu.client.set_visible_chat(None);
         self.kick();
     }
 
@@ -642,13 +707,39 @@ impl App {
         self.vol_mode = false;
         self.water_settings = false;
         self.todo_edit = false;
+        self.drop_focus();
+        self.tgu.client.set_visible_chat(if p == P_TG { self.tgu.open } else { None });
+        if p == P_TG {
+            if let Some(id) = self.tgu.open {
+                self.tgu.client.mark_read(id);
+            }
+        }
         self.s.last_page = p;
         self.s.save();
         self.kick();
     }
 
+    /// Something is being typed: keyboard focus stays with the island.
     fn editing(&self) -> bool {
+        self.add.is_some() || self.tgu.focus
+    }
+
+    /// The island must not close on mouse-out (half-typed text, a sign-in step).
+    fn keeps_open(&self) -> bool {
         self.add.is_some()
+            || (self.tgu.focus && (!self.tgu.text.is_empty() || self.tgu.field() != Some(telegram::Field::Reply)))
+    }
+
+    fn drop_focus(&mut self) {
+        if self.tgu.focus {
+            self.tgu.focus = false;
+            sys::set_activatable(self.hwnd, self.add.is_some());
+            if self.add.is_none() {
+                unsafe {
+                    let _ = KillTimer(self.hwnd, T_CARET);
+                }
+            }
+        }
     }
 
     // -------------------------------------------------------------- alerts / hud
@@ -704,6 +795,9 @@ impl App {
             Act::WaterDrank => self.drink(),
             Act::WaterSnooze => self.water_snooze(),
             Act::WaterRefilled => self.water_refilled(),
+            Act::OpenFile(p) => sys::open_path(&p),
+            Act::ShowInFolder(p) => downloads::show_in_folder(&p),
+            Act::OpenClaude => self.claude_open(),
         }
     }
 
@@ -723,6 +817,7 @@ impl App {
     pub fn draw(&mut self) {
         let Some(mut g) = self.gfx.take() else { return };
         self.ensure_art(&g);
+        self.ensure_avatars(&g);
         for _ in 0..2 {
             let _ = g.begin();
             self.hits = self.paint(&mut g);
@@ -770,13 +865,7 @@ impl App {
         }
 
         let lw = match self.layer {
-            Layer::Expanded => {
-                if self.wide_shown && self.page_shown == P_MUSIC {
-                    520.0
-                } else {
-                    420.0
-                }
-            }
+            Layer::Expanded => expanded_size(self.page_shown, self.wide_shown).0,
             l => self.layer_size(l).0,
         };
         let ox = (CX - lw / 2.0).round();
@@ -800,6 +889,7 @@ impl App {
             }
             Layer::Expanded => self.draw_expanded(g, &mut hits),
             Layer::Settings => self.draw_settings(g, &mut hits),
+            Layer::Peek => self.draw_peek(g, &mut hits),
             Layer::Ghost => {}
         }
         g.unclip();
@@ -846,8 +936,14 @@ impl App {
                 return;
             }
         }
-        // left: artwork while playing, otherwise the battery ring
-        if self.m.playing && self.art.is_some() {
+        if self.pill_download() {
+            self.draw_pill_download(g, w, h);
+            return;
+        }
+        // left: Claude at work, artwork while playing, otherwise the battery ring
+        if self.claude.state == claude::ST_WORKING && self.s.claude_on {
+            claude_page::spark(g, 21.0, cy, 7.5, claude_page::ORANGE, Some(self.t()));
+        } else if self.m.playing && self.art.is_some() {
             if let Some(bmp) = &self.art {
                 let s = h - 10.0;
                 g.image(bmp, R::new(13.0, 5.0, s, s), 5.0);
@@ -875,8 +971,55 @@ impl App {
         } else if self.s.mascot {
             widgets::mascot(g, w - 22.0, cy, self.blink);
         }
+        // badges: Windows notifications, Telegram unread, a Claude answer you haven't seen
+        let mut bx = w - 9.0;
         if self.s.notif_badge && self.notif > 0 {
-            g.circle(w - 9.0, 8.0, 2.6, gfx::RED);
+            g.circle(bx, 8.0, 2.6, gfx::RED);
+            bx -= 7.0;
+        }
+        if self.tgu.ready() && self.tgu.view.unread > 0 {
+            g.circle(bx, 8.0, 2.6, telegram::TG_BLUE);
+            bx -= 7.0;
+        }
+        if self.claude.unseen && self.s.claude_on {
+            g.circle(bx, 8.0, 2.6, claude_page::ORANGE);
+        }
+    }
+
+    fn draw_pill_download(&self, g: &Gfx, w: f32, h: f32) {
+        let act = self.dl.active();
+        let cy = h / 2.0;
+        let (recv, total): (u64, u64) = act.iter().fold((0, 0), |(r, t), d| (r + d.received, t + d.total));
+        let known = act.iter().all(|d| d.total > 0);
+        let frac = if known && total > 0 { (recv as f64 / total as f64) as f32 } else { 0.0 };
+        // ring with an arrow
+        let rad = if self.s.minimal { 7.0 } else { 8.5 };
+        g.ring(22.0, cy, rad, 2.2, gfx::BLUE.a(0.25));
+        if known {
+            g.arc(22.0, cy, rad, 2.2, frac, gfx::BLUE);
+        } else {
+            // size unknown: a full, softer ring
+            g.ring(22.0, cy, rad, 2.2, gfx::BLUE.a(0.7));
+        }
+        g.icon('\u{E896}', 22.0, cy, rad * 0.95, gfx::WHITE);
+        let name = if act.len() == 1 { act[0].name.clone() } else { format!("{} downloads", act.len()) };
+        let paused = act.iter().all(|d| d.state == downloads::DlState::Paused);
+        let right = if paused {
+            "Paused".to_string()
+        } else if known && total > 0 {
+            format!("{}%", (frac * 100.0).floor() as i32)
+        } else {
+            downloads::fmt_size(recv)
+        };
+        let rw = g.measure(&right, 11.0, 700) + 4.0;
+        g.text(&name, R::new(38.0, 0.0, w - 38.0 - rw - 18.0, h), 11.5, 600, gfx::WHITE, Align::Left);
+        g.text(&right, R::new(w - 14.0 - rw, 0.0, rw, h), 11.0, 700, if paused { gfx::GRAY } else { gfx::BLUE }, Align::Right);
+        // thin overall bar along the bottom edge
+        if known {
+            let x0 = 18.0;
+            let x1 = w - 18.0;
+            g.rrect(R::new(x0, h - 3.0, x1 - x0, 1.6), 0.8, gfx::WHITE.a(0.12));
+            g.rrect(R::new(x0, h - 3.0, (x1 - x0) * frac, 1.6), 0.8, gfx::BLUE);
         }
     }
 
@@ -901,6 +1044,8 @@ impl App {
         hits.on = on && page_hits;
         match page {
             P_MUSIC => self.draw_music(g, hits),
+            P_TG => self.draw_telegram(g, hits),
+            P_CLAUDE => self.draw_claude(g, hits),
             P_POMO => self.draw_pomo(g, hits),
             P_WATER => self.draw_water(g, hits),
             P_SHELF => self.draw_shelf(g, hits),
@@ -909,37 +1054,44 @@ impl App {
         hits.on = on;
         g.alpha = base;
         // arrows + dots
-        if !self.editing() {
-            for (x, glyph) in [(22.0, '\u{E76B}'), (398.0, '\u{E76C}')] {
-                g.circle(x, 70.0, 10.0, gfx::CHIP_HI);
-                g.icon(glyph, x, 70.0, 8.5, gfx::WHITE);
+        let (pw, ph) = expanded_size(page, false);
+        let ay = ph / 2.0;
+        if self.add.is_none() {
+            for (x, glyph) in [(22.0, '\u{E76B}'), (pw - 22.0, '\u{E76C}')] {
+                g.circle(x, ay, 10.0, gfx::CHIP_HI);
+                g.icon(glyph, x, ay, 8.5, gfx::WHITE);
             }
-            hits.add(R::new(8.0, 54.0, 28.0, 32.0), Hit::PrevPage);
-            hits.add(R::new(384.0, 54.0, 28.0, 32.0), Hit::NextPage);
+            hits.add(R::new(8.0, ay - 16.0, 28.0, 32.0), Hit::PrevPage);
+            hits.add(R::new(pw - 36.0, ay - 16.0, 28.0, 32.0), Hit::NextPage);
         }
         let n = PAGES as f32;
         let total = (n - 1.0) * 10.0 + 14.0;
-        let mut x = 210.0 - total / 2.0;
+        let mut x = pw / 2.0 - total / 2.0;
+        let dy = ph - 9.5;
         for i in 0..PAGES {
             let wdt = if i == self.page { 14.0 } else { 5.0 };
-            g.rrect(R::new(x, 130.5, wdt, 5.0), 2.5, if i == self.page { gfx::WHITE } else { gfx::DIM });
-            hits.add(R::new(x - 2.5, 126.0, wdt + 5.0, 14.0), Hit::Page(i));
+            g.rrect(R::new(x, dy, wdt, 5.0), 2.5, if i == self.page { gfx::WHITE } else { gfx::DIM });
+            hits.add(R::new(x - 2.5, dy - 4.5, wdt + 5.0, 14.0), Hit::Page(i));
             x += wdt + 5.0;
         }
     }
 
     fn draw_header(&self, g: &Gfx, page: usize) {
         let cy = 19.0;
+        let pw = expanded_size(page, false).0;
         // left: title
         let (a, b, bc) = match page {
             P_MUSIC => ("", "", gfx::WHITE),
+            P_TG => ("Tele", "gram", telegram::TG_BLUE),
+            P_CLAUDE => ("Claude", "", gfx::WHITE),
             P_POMO => ("Pomodoro", "", gfx::WHITE),
             P_WATER => ("Water ", "Reminder", gfx::BLUE),
             P_SHELF => ("Shelf", "", gfx::WHITE),
             _ => ("Todo", "List", gfx::GREEN),
         };
         let aw = g.measure(a, 13.0, 700);
-        g.text(a, R::new(30.0, cy - 9.0, aw + 2.0, 18.0), 13.0, 700, gfx::WHITE, Align::Left);
+        let ac = if page == P_CLAUDE { claude_page::ORANGE } else { gfx::WHITE };
+        g.text(a, R::new(30.0, cy - 9.0, aw + 2.0, 18.0), 13.0, 700, ac, Align::Left);
         if !b.is_empty() {
             let bw = g.measure(b, 13.0, 700);
             g.text(b, R::new(30.0 + aw, cy - 9.0, bw + 2.0, 18.0), 13.0, 700, bc, Align::Left);
@@ -950,17 +1102,23 @@ impl App {
         let dw = g.measure(&date, 10.5, 400);
         let tw = g.measure(&time, 10.5, 700);
         let total = 14.0 + 6.0 + dw + 5.0 + tw;
-        let x = 216.0 - total / 2.0;
+        let x = pw / 2.0 + 6.0 - total / 2.0;
         widgets::battery_ring(g, x + 7.0, cy, 6.0, &self.batt);
         g.text(&date, R::new(x + 20.0, cy - 8.0, dw + 2.0, 16.0), 10.5, 400, gfx::GRAY, Align::Left);
         g.text(&time, R::new(x + 25.0 + dw, cy - 8.0, tw + 2.0, 16.0), 10.5, 700, gfx::WHITE, Align::Left);
         // right: equalizer + bell (shelf uses the corner for "Clear all")
-        if page != P_SHELF {
+        if page == P_TG && self.tgu.ready() && self.tgu.view.unread > 0 {
+            let n = self.tgu.view.unread.min(999).to_string();
+            let bw = (g.measure(&n, 10.0, 700) + 12.0).max(20.0);
+            let r = R::new(pw - 30.0 - bw, cy - 8.0, bw, 16.0);
+            g.rrect(r, 8.0, telegram::TG_BLUE);
+            g.text(&n, r, 10.0, 700, gfx::WHITE, Align::Center);
+        } else if page != P_SHELF {
             if self.m.playing {
-                widgets::equalizer(g, 372.0, cy, true, self.t(), gfx::WHITE);
+                widgets::equalizer(g, pw - 48.0, cy, true, self.t(), gfx::WHITE);
             }
             if self.s.notif_badge && self.notif > 0 {
-                widgets::bell(g, 354.0, cy, self.notif);
+                widgets::bell(g, pw - 66.0, cy, self.notif);
             }
         }
     }
@@ -993,7 +1151,7 @@ impl App {
         unsafe {
             let _ = KillTimer(self.hwnd, T_CLOSE);
         }
-        if !self.expanded && self.alerts.is_empty() && !self.s.open_click {
+        if !self.expanded && self.alerts.is_empty() && self.tgu.peek.is_none() && !self.s.open_click {
             unsafe {
                 SetTimer(self.hwnd, T_HOVER, 120, None);
             }
@@ -1134,7 +1292,7 @@ impl App {
         let (x, y) = self.cursor_logical();
         let over_nav = matches!(self.find_hit(x, y), Some(Hit::PrevPage | Hit::NextPage | Hit::Page(_)))
             || (y < 32.0 && self.island_rect().contains(x, y));
-        if over_nav && !self.editing() {
+        if over_nav && self.add.is_none() {
             if (self.wheel_acc > 0) != (delta > 0) {
                 self.wheel_acc = 0;
             }
@@ -1149,6 +1307,7 @@ impl App {
         self.wheel_acc = 0;
         let up = delta > 0;
         match self.page {
+            P_TG => self.tg_wheel(up),
             P_MUSIC => {
                 if let Some((v, _)) = self.audio.volume() {
                     self.vol_mode = true;
@@ -1268,6 +1427,22 @@ impl App {
             Hit::TodoCancel => return self.todo_cancel(),
             Hit::TodoSave => return self.todo_save(),
             Hit::OpenSettings => self.open_settings(),
+            Hit::SetAction(a) => self.settings_action(a),
+            Hit::TgInput => return self.tg_focus(true),
+            Hit::TgSubmit => {
+                self.tg_submit();
+                return self.tg_focus(true);
+            }
+            Hit::TgOpenSite => sys::open_path("https://my.telegram.org/apps"),
+            Hit::TgResetKeys => self.tg_reset_keys(),
+            Hit::TgChat(id) => return self.tg_open_chat(id, true),
+            Hit::TgBack => return self.tg_back(),
+            Hit::TgSend => {
+                self.tg_submit();
+                return self.tg_focus(true);
+            }
+            Hit::TgPeek | Hit::TgPeekReply => return self.tg_peek_open(),
+            Hit::ClaudeOpen => self.claude_open(),
             h @ (Hit::SetClose
             | Hit::SetQuit
             | Hit::SetFolder
@@ -1286,6 +1461,10 @@ impl App {
     // -------------------------------------------------------------- keyboard (to-do input)
 
     pub fn on_char(&mut self, ch: u32) -> Option<Deferred> {
+        if self.tgu.focus {
+            self.tg_key_char(ch);
+            return None;
+        }
         let form = self.add.as_mut()?;
         match ch {
             8 => {
@@ -1307,6 +1486,20 @@ impl App {
     }
 
     pub fn on_keydown(&mut self, vk: u32) -> Option<Deferred> {
+        if self.tgu.focus {
+            if vk == VK_RETURN.0 as u32 {
+                return self.tg_submit();
+            }
+            if vk == VK_ESCAPE.0 as u32 {
+                if self.tgu.open.is_some() && self.tgu.text.is_empty() {
+                    return self.tg_back();
+                }
+                self.tgu.text.clear();
+                self.draw();
+                return self.tg_focus(false);
+            }
+            return None;
+        }
         self.add.as_ref()?;
         if vk == VK_RETURN.0 as u32 {
             self.todo_save()
@@ -1554,7 +1747,7 @@ impl App {
                 unsafe {
                     let _ = KillTimer(self.hwnd, T_HOVER);
                 }
-                if self.cursor_in_island() && self.alerts.is_empty() && !self.s.open_click {
+                if self.cursor_in_island() && self.alerts.is_empty() && self.tgu.peek.is_none() && !self.s.open_click {
                     self.expand();
                 }
             }
@@ -1562,7 +1755,7 @@ impl App {
                 unsafe {
                     let _ = KillTimer(self.hwnd, T_CLOSE);
                 }
-                if !self.cursor_in_island() && !self.editing() && self.press.is_none() && !self.drag_over {
+                if !self.cursor_in_island() && !self.keeps_open() && self.press.is_none() && !self.drag_over {
                     self.collapse();
                 }
             }
@@ -1633,6 +1826,12 @@ impl App {
                 self.copied = None;
                 self.draw();
             }
+            T_PEEK => self.peek_tick(),
+            T_SPIN => {
+                if self.claude.state == claude::ST_WORKING && !self.hidden {
+                    self.draw();
+                }
+            }
             T_PET => {
                 unsafe {
                     let _ = KillTimer(self.hwnd, T_PET);
@@ -1688,6 +1887,10 @@ impl App {
         }
         self.check_language();
         self.update_pet();
+        self.claude_second();
+        if self.expanded && self.page == P_CLAUDE {
+            self.draw();
+        }
         if self.s.mascot && !self.expanded && !self.m.playing && self.ticks % 4 == 0 && self.layer == Layer::Pill {
             self.blink = true;
             self.draw();
@@ -1716,6 +1919,9 @@ impl App {
             && !self.settings_open
             && self.alerts.is_empty()
             && self.hud.is_none()
+            && self.tgu.peek.is_none()
+            && !self.pill_download()
+            && self.claude.state != claude::ST_WORKING
             && !self.auto_hide;
         let want = can && sys::idle_ms() >= 45_000;
         if want != self.pet {
@@ -1758,6 +1964,7 @@ impl App {
     /// Applies a settings change made from the tray menu.
     pub fn settings_changed(&mut self, layout: bool) {
         self.s.save();
+        self.claude_enabled.store(self.s.claude_on, Ordering::Relaxed);
         sys::set_autostart(self.s.autostart);
         self.apply_speed();
         if layout {
@@ -1771,6 +1978,44 @@ impl App {
 
     pub fn settings_mut(&mut self) -> &mut Settings {
         &mut self.s
+    }
+
+    /// A message relayed from the browser extension (WM_COPYDATA).
+    pub fn on_download_msg(&mut self, raw: &str) {
+        let was = self.pill_download();
+        match self.dl.on_message(raw) {
+            downloads::Event::None => return,
+            downloads::Event::Changed => {}
+            downloads::Event::Done(d) => {
+                if self.s.downloads_on && self.s.dl_popup {
+                    let size = if d.total > 0 { downloads::fmt_size(d.total) } else { downloads::fmt_size(d.received) };
+                    self.alert(
+                        AlertIcon::Glyph('\u{E73E}'),
+                        gfx::GREEN,
+                        "Download complete",
+                        &format!("{} · {}", d.name, size),
+                        vec![("Folder".into(), Act::ShowInFolder(d.path.clone())), ("Open".into(), Act::OpenFile(d.path.clone()))],
+                    );
+                    if let Some(a) = self.alerts.last_mut() {
+                        a.until = Instant::now() + Duration::from_secs(8);
+                    }
+                }
+            }
+            downloads::Event::Failed(d) => {
+                if self.s.downloads_on {
+                    let why = match &d.state {
+                        downloads::DlState::Failed(e) => downloads::failure_text(e),
+                        _ => String::new(),
+                    };
+                    self.alert(AlertIcon::Glyph('\u{E783}'), gfx::RED, "Download failed", &format!("{} · {}", d.name, why), Vec::new());
+                }
+            }
+        }
+        if was != self.pill_download() {
+            self.kick();
+        } else if !self.hidden {
+            self.draw();
+        }
     }
 
     pub fn shutdown(&mut self) {
@@ -1815,4 +2060,13 @@ fn art_tint(px: &[u8]) -> Option<Color> {
     let target = if sat_sum / n < 0.08 { 0.28 } else { 0.62 };
     let k = target / mx;
     Some(Color((r * k).min(1.0), (g * k).min(1.0), (b * k).min(1.0), 1.0))
+}
+
+/// Size of the expanded island for a page.
+fn expanded_size(page: usize, wide: bool) -> (f32, f32) {
+    match page {
+        P_MUSIC if wide => (520.0, 140.0),
+        P_TG => (telegram::W, telegram::H),
+        _ => (420.0, 140.0),
+    }
 }

@@ -49,6 +49,12 @@ toggles!(
     notif_badge => "Notification badge",        // 19
     shelf_clear => "Remove after drag out",     // 20
     lyrics_view => "Lyrics view",               // 21
+    tg_popups => "Message popups",              // 22
+    tg_preview => "Show message text",          // 23
+    downloads_on => "Show downloads",           // 24
+    dl_popup => "Popup when finished",          // 25
+    claude_on => "Track Claude Desktop",        // 26
+    claude_popup => "Popup when an answer is ready", // 27
 );
 
 pub fn toggle_get(s: &Settings, i: usize) -> bool {
@@ -127,10 +133,13 @@ impl Field {
 
 // ------------------------------------------------------------------ layout
 
-pub const CATS: [(&str, char); 8] = [
+pub const CATS: [(&str, char); 11] = [
     ("General", '\u{E713}'),
     ("Appearance", '\u{E790}'),
     ("Music", '\u{EC4F}'),
+    ("Telegram", '\u{E724}'),
+    ("Claude", '\u{E8BD}'),
+    ("Downloads", '\u{E896}'),
     ("Pomodoro", '\u{E916}'),
     ("Water", '\u{0}'),
     ("To-do", '\u{E73E}'),
@@ -143,6 +152,7 @@ enum Kind {
     Choice(Field, Vec<(String, i32)>),
     Hours(Field),
     Button(&'static str, Hit),
+    Text(String),
 }
 
 struct Row {
@@ -172,7 +182,22 @@ fn liters(v: &[i32]) -> Vec<(String, i32)> {
         .collect()
 }
 
-fn rows(cat: usize, monitors: usize) -> Vec<Row> {
+pub struct Info {
+    pub monitors: usize,
+    pub tg_ready: bool,
+    pub tg_name: String,
+    pub ext_connected: bool,
+}
+
+pub const ACT_TG_LOGOUT: u8 = 1;
+pub const ACT_TG_SIGNIN: u8 = 2;
+pub const ACT_TG_RESET: u8 = 3;
+pub const ACT_EXT_INSTALL: u8 = 4;
+pub const ACT_EXT_FOLDER: u8 = 5;
+pub const ACT_CLAUDE_OPEN: u8 = 6;
+
+fn rows(cat: usize, info: &Info) -> Vec<Row> {
+    let monitors = info.monitors;
     match cat {
         0 => vec![
             tog(0),
@@ -193,12 +218,34 @@ fn rows(cat: usize, monitors: usize) -> Vec<Row> {
             tog(19),
         ],
         2 => vec![tog(7), tog(21), tog(8)],
-        3 => vec![
+        3 => {
+            let mut v = vec![tog(22), tog(23)];
+            if info.tg_ready {
+                v.push(row("Account", Kind::Text(info.tg_name.clone())));
+                v.push(row("Sign out of Telegram", Kind::Button("Log out", Hit::SetAction(ACT_TG_LOGOUT))));
+            } else {
+                v.push(row("Account", Kind::Button("Sign in", Hit::SetAction(ACT_TG_SIGNIN))));
+                v.push(row("API keys", Kind::Button("Reset", Hit::SetAction(ACT_TG_RESET))));
+            }
+            v
+        }
+        4 => vec![tog(26), tog(27), row("Claude Desktop", Kind::Button("Open", Hit::SetAction(ACT_CLAUDE_OPEN)))],
+        5 => vec![
+            tog(24),
+            tog(25),
+            row(
+                "Browser extension",
+                Kind::Text(if info.ext_connected { "Connected".into() } else { "Not connected yet".into() }),
+            ),
+            row("Install in Chrome / Edge", Kind::Button("Install", Hit::SetAction(ACT_EXT_INSTALL))),
+            row("Extension folder", Kind::Button("Show", Hit::SetAction(ACT_EXT_FOLDER))),
+        ],
+        6 => vec![
             row("Focus, min", Kind::Choice(Field::Focus, mins(&[15, 20, 25, 30, 45, 50]))),
             row("Short break, min", Kind::Choice(Field::Short, mins(&[3, 5, 10]))),
             row("Long break, min", Kind::Choice(Field::Long, mins(&[10, 15, 20, 30]))),
         ],
-        4 => vec![
+        7 => vec![
             tog(9),
             row("Daily goal, L", Kind::Choice(Field::Goal, liters(&[1500, 2000, 2500, 3000]))),
             row("Glass, ml", Kind::Choice(Field::Glass, mins(&[150, 200, 250, 300]))),
@@ -206,8 +253,8 @@ fn rows(cat: usize, monitors: usize) -> Vec<Row> {
             row("Reminders from", Kind::Hours(Field::From)),
             row("Reminders until", Kind::Hours(Field::Until)),
         ],
-        5 => vec![tog(10), tog(11), row("“Later” snoozes, min", Kind::Choice(Field::Snooze, mins(&[5, 10, 15, 30])))],
-        6 => vec![tog(12), tog(13), tog(14), tog(15), tog(16), tog(17), tog(18)],
+        8 => vec![tog(10), tog(11), row("“Later” snoozes, min", Kind::Choice(Field::Snooze, mins(&[5, 10, 15, 30])))],
+        9 => vec![tog(12), tog(13), tog(14), tog(15), tog(16), tog(17), tog(18)],
         _ => vec![tog(20), row("Clear the shelf", Kind::Button("Clear", Hit::ShelfClear))],
     }
 }
@@ -226,7 +273,7 @@ impl App {
 
         // sidebar
         for (i, (name, glyph)) in CATS.iter().enumerate() {
-            let r = R::new(18.0, 48.0 + i as f32 * 28.0, 130.0, 26.0);
+            let r = R::new(18.0, 46.0 + i as f32 * 22.5, 130.0, 21.0);
             let sel = i == self.set_cat;
             if sel {
                 g.rrect(r, 9.0, gfx::CHIP_HI);
@@ -237,17 +284,29 @@ impl App {
             } else {
                 g.icon(*glyph, r.x + 16.0, r.cy(), 11.0, c);
             }
-            g.text(name, R::new(r.x + 32.0, r.y, r.w - 34.0, r.h), 12.0, 600, c, Align::Left);
+            g.text(name, R::new(r.x + 32.0, r.y, r.w - 34.0, r.h), 11.5, 600, c, Align::Left);
             hits.add(r, Hit::SetCat(i as u8));
         }
-        let q = R::new(18.0, 292.0, 130.0, 24.0);
+        let q = R::new(18.0, 300.0, 130.0, 22.0);
         widgets::chip(g, q, "Quit Notch", Some('\u{E7E8}'), gfx::CHIP, gfx::RED, 11.0);
         hits.add(q, Hit::SetQuit);
         g.line(160.0, 50.0, 160.0, 312.0, 1.0, gfx::WHITE.a(0.08));
 
         // rows
-        let mons = sys::monitors().len();
-        for (i, rw) in rows(self.set_cat, mons).iter().enumerate() {
+        let info = Info {
+            monitors: sys::monitors().len(),
+            tg_ready: self.tgu.ready(),
+            tg_name: self
+                .tgu
+                .client
+                .state
+                .lock()
+                .ok()
+                .and_then(|s| s.users.get(&s.me).cloned())
+                .unwrap_or_else(|| "Signed in".into()),
+            ext_connected: self.dl.connected,
+        };
+        for (i, rw) in rows(self.set_cat, &info).iter().enumerate() {
             let y = 46.0 + i as f32 * ROW_H;
             g.text(rw.label, R::new(176.0, y, 170.0, ROW_H), 12.0, 600, gfx::WHITE, Align::Left);
             if i > 0 {
@@ -282,6 +341,9 @@ impl App {
                     hits.add(minus, Hit::SetStep(*f, -1));
                     hits.add(plus, Hit::SetStep(*f, 1));
                 }
+                Kind::Text(t) => {
+                    g.text(t, R::new(RX - 160.0, y, 160.0, ROW_H), 11.5, 600, gfx::GRAY, Align::Right);
+                }
                 Kind::Button(label, h) => {
                     let w = g.measure(label, 11.0, 600) + 24.0;
                     let r = R::new(RX - w, y + 6.0, w, 22.0);
@@ -306,6 +368,39 @@ impl App {
         if self.cursor_in_island() {
             self.expand();
         }
+    }
+
+    pub(super) fn settings_action(&mut self, a: u8) {
+        match a {
+            ACT_TG_LOGOUT => {
+                self.tgu.client.logout();
+                self.tgu.open = None;
+                self.tgu.refresh();
+            }
+            ACT_TG_SIGNIN => {
+                self.settings_open = false;
+                self.page = super::P_TG;
+                self.expanded = true;
+            }
+            ACT_TG_RESET => self.tg_reset_keys(),
+            ACT_EXT_INSTALL => {
+                crate::downloads::open_install(self.hwnd);
+                self.alert(
+                    super::AlertIcon::Glyph('\u{E896}'),
+                    gfx::BLUE,
+                    "Folder path copied",
+                    "Turn on Developer mode → Load unpacked → Ctrl+V",
+                    Vec::new(),
+                );
+                if let Some(al) = self.alerts.last_mut() {
+                    al.until = std::time::Instant::now() + std::time::Duration::from_secs(12);
+                }
+            }
+            ACT_EXT_FOLDER => sys::open_path(&crate::downloads::extension_dir().to_string_lossy()),
+            ACT_CLAUDE_OPEN => crate::claude::open(),
+            _ => {}
+        }
+        self.kick();
     }
 
     pub(super) fn settings_click(&mut self, h: Hit) -> Option<Deferred> {
