@@ -12,12 +12,18 @@ public static class Mouse {
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e);
     [DllImport("user32.dll")] public static extern IntPtr FindWindow(string c, string n);
+    [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint f, UIntPtr e);
+    public static void Key(byte vk) { keybd_event(vk, 0, 0, UIntPtr.Zero); keybd_event(vk, 0, 2, UIntPtr.Zero); }
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
     public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(2, 0, 0, 0, UIntPtr.Zero); mouse_event(4, 0, 0, 0, UIntPtr.Zero); }
 }
 "@
 
+# isolated data folder: water reminders off so no alert covers the pages
+$env:APPDATA = Join-Path $env:RUNNER_TEMP "notch-appdata"
+New-Item -ItemType Directory -Force (Join-Path $env:APPDATA "Notch") | Out-Null
+Set-Content -Path (Join-Path $env:APPDATA "Notch/settings.txt") -Value "water_on=false`nautostart=false"
 $p = Start-Process -FilePath $Exe -PassThru
 Start-Sleep -Seconds 4
 if ($p.HasExited) {
@@ -66,6 +72,16 @@ for ($i = 1; $i -le 4; $i++) {
     Start-Sleep -Milliseconds 900
     Shot "page$i" ([int](150 * $s))
 }
+
+# leave, let it collapse, then Caps Lock HUD
+[void][Mouse]::SetCursorPos(5, 600)
+Start-Sleep -Milliseconds 1200
+Shot "collapsed" ([int](60 * $s))
+[Mouse]::Key(0x14)
+Start-Sleep -Milliseconds 450
+Shot "hud-caps" ([int](60 * $s))
+[Mouse]::Key(0x14)
+Start-Sleep -Milliseconds 2200
 
 if ($p.HasExited) {
     Write-Output "::error title=smoke::Notch.exe crashed while interacting (code $($p.ExitCode))"

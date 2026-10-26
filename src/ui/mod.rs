@@ -348,7 +348,6 @@ impl App {
             SetTimer(hwnd, T_WATER, 15_000, None);
         }
         app.check_todo();
-        app.check_water();
         app
     }
 
