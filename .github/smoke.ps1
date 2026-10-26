@@ -111,6 +111,16 @@ Shot "water-refill" ([int](150 * $s))
 IClick 320 39
 Start-Sleep -Milliseconds 900
 
+# settings panel from the gear in the header
+IClick 400 19
+Start-Sleep -Milliseconds 900
+Shot "settings" ([int](335 * $s))
+IClick 70 112
+Start-Sleep -Milliseconds 500
+Shot "settings-appearance" ([int](335 * $s))
+IClick 492 25
+Start-Sleep -Milliseconds 700
+
 # leave, let it collapse, then Caps Lock HUD
 [void][Mouse]::SetCursorPos(5, 600)
 Start-Sleep -Milliseconds 1200

@@ -19,6 +19,7 @@ use crate::sys;
 mod hud;
 mod media_page;
 mod pomodoro;
+pub mod settings;
 mod shelf_page;
 mod todo;
 mod water;
@@ -32,7 +33,7 @@ pub use widgets::Hits;
 /// Logical canvas: the layered window is this big; transparent pixels are
 /// click-through, so only the island itself catches the mouse.
 pub const CW: f32 = 560.0;
-pub const CH: f32 = 190.0;
+pub const CH: f32 = 340.0;
 pub const CX: f32 = CW / 2.0;
 pub const EAR: f32 = 9.0;
 
@@ -74,6 +75,8 @@ pub const T_BLINK: usize = 19;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Layer {
+    Ghost,
+    Settings,
     Pill,
     Expanded,
     Hud,
@@ -124,6 +127,15 @@ pub enum Hit {
     TodoDurChip,
     TodoCancel,
     TodoSave,
+    // settings
+    OpenSettings,
+    SetClose,
+    SetQuit,
+    SetFolder,
+    SetCat(u8),
+    SetToggle(u8),
+    SetChoice(settings::Field, i32),
+    SetStep(settings::Field, i8),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -182,6 +194,7 @@ pub enum Deferred {
     DragOut(Vec<String>, usize),
     Menu,
     Focus(bool),
+    Quit,
 }
 
 // ------------------------------------------------------------------ app
@@ -227,6 +240,10 @@ pub struct App {
     track: String,
     wide_shown: bool,
     wheel_acc: i32,
+    settings_open: bool,
+    set_cat: usize,
+    auto_hide: bool,
+    body: Fade,
     vol_mode: bool,
     seek_preview: Option<f64>,
     audio: sys::Audio,
@@ -318,6 +335,10 @@ impl App {
             track: String::new(),
             wide_shown: false,
             wheel_acc: 0,
+            settings_open: false,
+            set_cat: 0,
+            auto_hide: false,
+            body: Fade::new(1.0, 6.0),
             vol_mode: false,
             seek_preview: None,
             audio: sys::Audio::new(),
@@ -430,17 +451,21 @@ impl App {
     fn desired_layer(&self) -> Layer {
         if !self.alerts.is_empty() {
             Layer::Alert
+        } else if self.settings_open {
+            Layer::Settings
         } else if self.expanded {
             Layer::Expanded
         } else if self.hud.is_some() {
             Layer::Hud
+        } else if self.auto_hide && self.pill_lyric().is_none() {
+            Layer::Ghost
         } else {
             Layer::Pill
         }
     }
 
     fn pill_lyric(&self) -> Option<String> {
-        if self.s.minimal || !self.m.playing || !self.s.lyrics || !self.s.lyrics_in_pill {
+        if self.s.minimal || !self.m.playing || !self.s.lyrics || !self.s.lyrics_view || !self.s.lyrics_in_pill {
             return None;
         }
         let (cur, _) = self.m.lyric_line()?;
@@ -471,6 +496,8 @@ impl App {
             Layer::Alert => (380.0, 78.0, 26.0),
             Layer::Expanded => (if self.wide_target() { 520.0 } else { 420.0 }, 140.0, 30.0),
             Layer::Hud => (250.0, 32.0, 14.0),
+            Layer::Ghost => (200.0, 8.0, 4.0),
+            Layer::Settings => (settings::W, settings::H, 30.0),
             Layer::Pill => {
                 let (w, h) = self.pill_size();
                 (w, h, if self.s.minimal { 12.0 } else { 13.0 })
@@ -501,10 +528,11 @@ impl App {
         if want != self.layer {
             self.fade.target = 0.0;
         }
+        self.body.target = if want == Layer::Ghost { 0.0 } else { 1.0 };
         if self.content_changing() {
             self.page_fade.target = 0.0;
         }
-        let moving = self.lyr.moving() || self.content_changing() || self.sw.moving() || self.sh.moving() || self.sr.moving() || self.fade.v != self.fade.target || self.page_fade.v != self.page_fade.target || want != self.layer;
+        let moving = self.body.v != self.body.target || self.lyr.moving() || self.content_changing() || self.sw.moving() || self.sh.moving() || self.sr.moving() || self.fade.v != self.fade.target || self.page_fade.v != self.page_fade.target || want != self.layer;
         if moving && !self.anim_on {
             self.anim_on = true;
             self.last_anim = Instant::now();
@@ -525,6 +553,8 @@ impl App {
         moving |= self.sr.step(dt);
         moving |= self.lyr.step(dt);
         let want = self.desired_layer();
+        self.body.target = if want == Layer::Ghost { 0.0 } else { 1.0 };
+        moving |= self.body.step(dt);
         if want != self.layer {
             self.fade.target = 0.0;
             // swap once the old layer has faded and the shape is mostly there
@@ -702,7 +732,8 @@ impl App {
     fn paint(&self, g: &mut Gfx) -> Vec<(R, Hit)> {
         let (w, h, r) = (self.sw.v, self.sh.v, self.sr.v);
         g.alpha = 1.0;
-        g.notch(CX, w, h, r, EAR, gfx::BLACK);
+        // auto-hidden: practically invisible, but alpha > 0 still catches the hover
+        g.notch(CX, w, h, r, EAR, gfx::BLACK.a(self.body.v.max(2.0 / 255.0)));
         if let Some(tint) = self.art_tint {
             let fade = crate::anim::ease_out(self.fade.v);
             if self.layer == Layer::Expanded && self.wide_shown && self.page_shown == P_MUSIC {
@@ -745,6 +776,8 @@ impl App {
                 }
             }
             Layer::Expanded => self.draw_expanded(g, &mut hits),
+            Layer::Settings => self.draw_settings(g, &mut hits),
+            Layer::Ghost => {}
         }
         g.unclip();
         g.reset_transform();
@@ -808,6 +841,8 @@ impl App {
         }
         g.alpha = base;
         self.draw_header(g, page);
+        g.icon('\u{E713}', 400.0, 19.0, 12.0, gfx::GRAY);
+        hits.add(R::new(386.0, 5.0, 28.0, 28.0), Hit::OpenSettings);
         g.alpha = base * crate::anim::ease_out(self.page_fade.v);
         let page_hits = self.page_fade.v > 0.5 && !self.content_changing();
         let on = hits.on;
@@ -870,10 +905,10 @@ impl App {
         // right: equalizer + bell (shelf uses the corner for "Clear all")
         if page != P_SHELF {
             if self.m.playing {
-                widgets::equalizer(g, 372.0, cy, true, self.t(), gfx::WHITE);
+                widgets::equalizer(g, 346.0, cy, true, self.t(), gfx::WHITE);
             }
             if self.s.notif_badge && self.notif > 0 {
-                widgets::bell(g, 354.0, cy, self.notif);
+                widgets::bell(g, 328.0, cy, self.notif);
             }
         }
     }
@@ -1178,6 +1213,14 @@ impl App {
             Hit::TodoDurChip => self.todo_cycle_dur(),
             Hit::TodoCancel => return self.todo_cancel(),
             Hit::TodoSave => return self.todo_save(),
+            Hit::OpenSettings => self.open_settings(),
+            h @ (Hit::SetClose
+            | Hit::SetQuit
+            | Hit::SetFolder
+            | Hit::SetCat(_)
+            | Hit::SetToggle(_)
+            | Hit::SetChoice(..)
+            | Hit::SetStep(..)) => return self.settings_click(h),
         }
         None
     }
@@ -1558,19 +1601,17 @@ impl App {
 
     fn on_second(&mut self) {
         self.ticks = self.ticks.wrapping_add(1);
-        // hide while something runs full screen
-        let hide = self.s.hide_fullscreen && sys::fullscreen_on(self.mon);
-        if hide != self.hidden {
-            self.hidden = hide;
-            unsafe {
-                let _ = ShowWindow(self.hwnd, if hide { SW_HIDE } else { SW_SHOWNOACTIVATE });
-            }
-            if !hide {
-                self.draw();
-            }
-        }
-        if self.hidden {
-            return;
+        // a maximised / full-screen app under the island: stay if only its
+        // title bar is there, otherwise tuck away until hovered
+        let ah = self.s.hide_fullscreen && {
+            let cx = self.win_x + (CX * self.scale) as i32;
+            let y = self.win_y + (10.0 * self.scale) as i32;
+            let dx = (70.0 * self.scale) as i32;
+            sys::cover_state(self.mon, &[(cx - dx, y), (cx, y), (cx + dx, y)]) == sys::Cover::Blocked
+        };
+        if ah != self.auto_hide {
+            self.auto_hide = ah;
+            self.kick();
         }
         if self.ticks % 5 == 0 {
             unsafe {

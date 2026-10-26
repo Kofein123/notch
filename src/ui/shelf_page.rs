@@ -32,7 +32,7 @@ impl App {
         }
 
         // header corner: Clear all
-        let cr = R::new(326.0, 10.0, 62.0, 20.0);
+        let cr = R::new(316.0, 10.0, 62.0, 20.0);
         widgets::chip(g, cr, "Clear all", None, gfx::CHIP, gfx::GRAY, 10.0);
         hits.add(cr, Hit::ShelfClear);
 

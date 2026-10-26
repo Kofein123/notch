@@ -80,46 +80,7 @@ fn tray_remove(hwnd: HWND) {
 
 // ------------------------------------------------------------------ menu
 
-macro_rules! toggles {
-    ($($field:ident => $label:expr),* $(,)?) => {
-        const TOGGLE_LABELS: &[&str] = &[$($label),*];
-        fn toggle_field(s: &mut Settings, i: usize) -> Option<&mut bool> {
-            let mut k = 0usize;
-            $(
-                if i == k {
-                    return Some(&mut s.$field);
-                }
-                k += 1;
-            )*
-            let _ = k;
-            None
-        }
-    };
-}
-
-toggles!(
-    autostart => "Start with Windows",       // 0
-    minimal => "Minimal mode",               // 1
-    mascot => "Mascot",                      // 2
-    sounds => "Sounds",                      // 3
-    open_click => "Open on click",           // 4
-    fast_animations => "Fast animations",    // 5
-    hide_fullscreen => "Hide in full screen",// 6
-    lyrics => "Lyrics",                      // 7
-    lyrics_in_pill => "Lyrics in the pill",  // 8
-    water_on => "Reminders",                 // 9
-    todo_start => "Remind at start",         // 10
-    todo_end => "Remind at end",             // 11
-    hud_volume => "Volume",                  // 12
-    hud_brightness => "Brightness",          // 13
-    hud_caps => "Caps Lock",                 // 14
-    hud_language => "Input language",        // 15
-    popup_battery => "Battery popups",       // 16
-    popup_wifi => "Wi-Fi popups",            // 17
-    popup_bluetooth => "Headset popups",     // 18
-    notif_badge => "Notification badge",     // 19
-    shelf_clear => "Remove after drag out",  // 20
-);
+use ui::settings::{toggle_field, TOGGLE_LABELS};
 
 const ID_TOGGLE: usize = 1000;
 const ID_SIZE: usize = 2000;
@@ -132,6 +93,7 @@ const ID_GLASS: usize = 2600; // + ml / 10
 const ID_SNOOZE: usize = 2700;
 const ID_FOLDER: usize = 3000;
 const ID_QUIT: usize = 3001;
+const ID_SETTINGS: usize = 3002;
 
 unsafe fn item(m: HMENU, id: usize, label: &str, checked: bool) {
     let w = gfx::wide0(label);
@@ -164,6 +126,7 @@ unsafe fn submenu(parent: HMENU, label: &str) -> HMENU {
 unsafe fn build_menu(s: &Settings) -> Option<HMENU> {
     let m = CreatePopupMenu().ok()?;
     grayed(m, concat!("Notch ", env!("CARGO_PKG_VERSION")));
+    item(m, ID_SETTINGS, "Settings…", false);
     sep(m);
     for i in 0..=6 {
         toggle(m, s, i);
@@ -183,6 +146,7 @@ unsafe fn build_menu(s: &Settings) -> Option<HMENU> {
 
     let music = submenu(m, "Music");
     toggle(music, s, 7);
+    toggle(music, s, 21);
     toggle(music, s, 8);
 
     let pomo = submenu(m, "Pomodoro");
@@ -238,6 +202,10 @@ unsafe fn build_menu(s: &Settings) -> Option<HMENU> {
 /// Returns true when the user chose Quit.
 fn apply_command(a: &mut App, id: usize) -> bool {
     let mut layout = false;
+    if id == ID_SETTINGS {
+        a.open_settings();
+        return false;
+    }
     {
         let s = a.settings_mut();
         match id {
@@ -314,6 +282,9 @@ fn run_deferred(hwnd: HWND, d: Option<Deferred>) {
             with_app(|a| a.after_drag(idx));
         }
         Some(Deferred::Menu) => show_menu(hwnd),
+        Some(Deferred::Quit) => unsafe {
+            let _ = DestroyWindow(hwnd);
+        },
         Some(Deferred::Focus(on)) => {
             set_activatable(hwnd, on);
             if on {

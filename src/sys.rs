@@ -311,6 +311,60 @@ pub fn fullscreen_on(mon: RECT) -> bool {
     }
 }
 
+/// What the foreground window does under the island.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cover {
+    /// nothing big up there
+    Free,
+    /// a maximised / full-screen window whose title-bar drag area is under the
+    /// island (Telegram, Explorer): the island can stay, it blocks nothing
+    Caption,
+    /// tabs, toolbars or a full-screen app under the island (Chrome, games):
+    /// the island should get out of the way
+    Blocked,
+}
+
+/// Checks the foreground window against the island area. `probes` are screen
+/// points (physical px) along the top of the island.
+pub fn cover_state(mon: RECT, probes: &[(i32, i32)]) -> Cover {
+    unsafe {
+        if let Ok(state) = SHQueryUserNotificationState() {
+            if state == QUNS_RUNNING_D3D_FULL_SCREEN || state == QUNS_PRESENTATION_MODE {
+                return Cover::Blocked;
+            }
+        }
+        let fg = GetForegroundWindow();
+        if fg.is_invalid() || !IsWindowVisible(fg).as_bool() || IsIconic(fg).as_bool() {
+            return Cover::Free;
+        }
+        let mut cls = [0u16; 64];
+        let n = GetClassNameW(fg, &mut cls);
+        let class = String::from_utf16_lossy(&cls[..n.max(0) as usize]);
+        if matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" | "NotchWindow") {
+            return Cover::Free;
+        }
+        let mut r = RECT::default();
+        if GetWindowRect(fg, &mut r).is_err() {
+            return Cover::Free;
+        }
+        let min_x = probes.iter().map(|p| p.0).min().unwrap_or(0);
+        let max_x = probes.iter().map(|p| p.0).max().unwrap_or(0);
+        let touches_top = r.top <= mon.top + 2 && r.bottom > mon.top + 40;
+        if !touches_top || r.left > min_x || r.right < max_x {
+            return Cover::Free;
+        }
+        for &(x, y) in probes {
+            let lp = LPARAM((((y as u16) as isize) << 16) | ((x as u16) as isize));
+            let mut res = 0usize;
+            let ok = SendMessageTimeoutW(fg, WM_NCHITTEST, WPARAM(0), lp, SMTO_ABORTIFHUNG, 60, Some(&mut res));
+            if ok.0 == 0 || res as u32 != HTCAPTION {
+                return Cover::Blocked;
+            }
+        }
+        Cover::Caption
+    }
+}
+
 // ------------------------------------------------------------------ monitors
 
 #[derive(Clone, Copy, Debug)]
