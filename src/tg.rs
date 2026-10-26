@@ -188,7 +188,11 @@ impl State {
 
     /// Unread messages in chats that aren't muted.
     pub fn unread_total(&self) -> i32 {
-        self.chats.values().filter(|c| c.order != 0 && !self.is_muted(c)).map(|c| c.unread).sum()
+        self.chats
+            .values()
+            .filter(|c| c.order != 0 && c.kind != Kind::Channel && !self.is_muted(c))
+            .map(|c| c.unread)
+            .sum()
     }
 }
 
@@ -454,6 +458,21 @@ impl Tg {
             "@type": "viewMessages", "chat_id": chat_id, "message_ids": ids,
             "source": {"@type": "messageSourceChatHistory"}, "force_read": true
         }));
+    }
+
+    /// Marks everything in a chat as read without opening it.
+    pub fn mark_chat_read(&self, chat_id: i64) {
+        let last = self.state.lock().ok().and_then(|s| s.chats.get(&chat_id).and_then(|c| c.last.as_ref().map(|m| m.id)));
+        let Some(last) = last else { return };
+        self.send(json!({"@type": "openChat", "chat_id": chat_id}));
+        self.send(json!({
+            "@type": "viewMessages", "chat_id": chat_id, "message_ids": [last],
+            "source": {"@type": "messageSourceChatHistory"}, "force_read": true
+        }));
+        let open = self.state.lock().ok().and_then(|s| s.open);
+        if open != Some(chat_id) {
+            self.send(json!({"@type": "closeChat", "chat_id": chat_id}));
+        }
     }
 
     pub fn send_text(&self, chat_id: i64, text: &str) {

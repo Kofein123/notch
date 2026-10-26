@@ -162,6 +162,9 @@ pub enum Hit {
     TgSend,
     TgPeek,
     TgPeekReply,
+    TgPeekRead,
+    TgAll,
+    TgQuick(u8),
     // claude
     ClaudeOpen,
 }
@@ -1038,6 +1041,9 @@ impl App {
         }
         g.alpha = base;
         self.draw_header(g, page);
+        if page == P_TG {
+            self.draw_tg_header(g, hits, expanded_size(page, false).0);
+        }
         g.alpha = base * crate::anim::ease_out(self.page_fade.v);
         let page_hits = self.page_fade.v > 0.5 && !self.content_changing();
         let on = hits.on;
@@ -1107,12 +1113,8 @@ impl App {
         g.text(&date, R::new(x + 20.0, cy - 8.0, dw + 2.0, 16.0), 10.5, 400, gfx::GRAY, Align::Left);
         g.text(&time, R::new(x + 25.0 + dw, cy - 8.0, tw + 2.0, 16.0), 10.5, 700, gfx::WHITE, Align::Left);
         // right: equalizer + bell (shelf uses the corner for "Clear all")
-        if page == P_TG && self.tgu.ready() && self.tgu.view.unread > 0 {
-            let n = self.tgu.view.unread.min(999).to_string();
-            let bw = (g.measure(&n, 10.0, 700) + 12.0).max(20.0);
-            let r = R::new(pw - 30.0 - bw, cy - 8.0, bw, 16.0);
-            g.rrect(r, 8.0, telegram::TG_BLUE);
-            g.text(&n, r, 10.0, 700, gfx::WHITE, Align::Center);
+        if page == P_TG && self.tgu.ready() {
+            // drawn by draw_tg_header (count + list button)
         } else if page != P_SHELF {
             if self.m.playing {
                 widgets::equalizer(g, pw - 48.0, cy, true, self.t(), gfx::WHITE);
@@ -1255,6 +1257,10 @@ impl App {
             }
             Some(Hit::TodoCheck(i)) => {
                 self.todo_delete(i);
+                None
+            }
+            Some(Hit::TgChat(id)) => {
+                self.tg_mark_read(id);
                 None
             }
             Some(_) => Some(Deferred::Menu),
@@ -1442,6 +1448,9 @@ impl App {
                 return self.tg_focus(true);
             }
             Hit::TgPeek | Hit::TgPeekReply => return self.tg_peek_open(),
+            Hit::TgPeekRead => self.tg_peek_read(),
+            Hit::TgAll => return self.tg_toggle_all(),
+            Hit::TgQuick(k) => return self.tg_quick(k),
             Hit::ClaudeOpen => self.claude_open(),
             h @ (Hit::SetClose
             | Hit::SetQuit
@@ -2066,7 +2075,6 @@ fn art_tint(px: &[u8]) -> Option<Color> {
 fn expanded_size(page: usize, wide: bool) -> (f32, f32) {
     match page {
         P_MUSIC if wide => (520.0, 140.0),
-        P_TG => (telegram::W, telegram::H),
         _ => (420.0, 140.0),
     }
 }

@@ -23,6 +23,10 @@ pub struct ClaudeUi {
     pub day: i32,
     pub count: u32,
     pub total: Duration,
+    /// minute of day the current answer started
+    pub started_at: Option<i32>,
+    /// (finished at, minute of day; took)
+    pub recent: Vec<(i32, Duration)>,
 }
 
 pub fn fmt_dur(d: Duration) -> String {
@@ -64,46 +68,60 @@ impl App {
     pub(super) fn draw_claude(&self, g: &Gfx, hits: &mut Hits) {
         let c = &self.claude;
         let working = c.state == claude::ST_WORKING;
-        let closed = c.state == claude::ST_CLOSED;
-        let (cx, cy) = (84.0, 74.0);
-        g.circle(cx, cy, 34.0, ORANGE.a(if closed { 0.06 } else { 0.14 }));
-        spark(g, cx, cy, 22.0, if closed { gfx::DIM } else { ORANGE }, if working { Some(self.t()) } else { None });
+        let closed = c.state == claude::ST_CLOSED || !self.s.claude_on;
+        let x0 = 44.0;
+        let x1 = 376.0;
 
-        let x = 140.0;
+        // row 1: mark, status, timer
+        g.circle(x0 + 12.0, 50.0, 15.0, ORANGE.a(if closed { 0.06 } else { 0.16 }));
+        spark(g, x0 + 12.0, 50.0, 10.0, if closed { gfx::DIM } else { ORANGE }, if working { Some(self.t()) } else { None });
         let (title, tc, sub) = if !self.s.claude_on {
             ("Tracking is off", gfx::GRAY, "Turn it on in Settings → Claude".to_string())
-        } else if closed {
-            ("Claude is closed", gfx::GRAY, "Open the Claude app to track answers".to_string())
+        } else if c.state == claude::ST_CLOSED {
+            ("Claude is closed", gfx::GRAY, "Open the app to track answers".to_string())
         } else if working {
-            let el = c.since.map(|t| fmt_dur(t.elapsed())).unwrap_or_default();
-            ("Writing an answer…", ORANGE, format!("for {el}"))
-        } else if let Some((t, d)) = c.last {
-            (
-                if c.unseen { "Answer is ready" } else { "Idle" },
-                if c.unseen { gfx::GREEN } else { gfx::WHITE },
-                format!("Last answer {} · took {}", ago(t), fmt_dur(d)),
-            )
+            let started = c.started_at.map(store::hhmm).unwrap_or_default();
+            ("Writing an answer…", ORANGE, format!("Started at {started}"))
+        } else if c.unseen {
+            let (t, d) = c.last.unwrap_or((Instant::now(), Duration::ZERO));
+            ("Answer is ready", gfx::GREEN, format!("Finished {} · took {}", ago(t), fmt_dur(d)))
+        } else if c.day == store::now().day && c.count > 0 {
+            let avg = c.total / c.count.max(1);
+            ("Idle", gfx::WHITE, format!("Today: {} answers · avg {}", c.count, fmt_dur(avg)))
         } else {
             ("Idle", gfx::WHITE, "Waiting for your next message".to_string())
         };
-        if c.unseen && !working {
-            g.icon('\u{E73E}', x + 7.0, 52.0, 13.0, gfx::GREEN);
-            g.text(title, R::new(x + 20.0, 40.0, 240.0, 24.0), 17.0, 700, tc, Align::Left);
+        g.text(title, R::new(x0 + 34.0, 37.0, 200.0, 20.0), 14.0, 700, tc, Align::Left);
+        g.text(&sub, R::new(x0 + 34.0, 56.0, 220.0, 16.0), 10.5, 400, gfx::GRAY, Align::Left);
+        let timer = if working {
+            c.since.map(|t| fmt_dur(t.elapsed()))
+        } else if !closed {
+            c.last.map(|(_, d)| fmt_dur(d))
         } else {
-            g.text(title, R::new(x, 40.0, 260.0, 24.0), 17.0, 700, tc, Align::Left);
-        }
-        g.text(&sub, R::new(x, 64.0, 250.0, 16.0), 11.0, 400, gfx::GRAY, Align::Left);
-        let today = if c.day == store::now().day && c.count > 0 {
-            let avg = c.total / c.count.max(1);
-            format!("Today: {} answers · avg {}", c.count, fmt_dur(avg))
-        } else {
-            "Today: no answers yet".into()
+            None
         };
-        g.text(&today, R::new(x, 82.0, 250.0, 16.0), 10.5, 400, gfx::DIM, Align::Left);
+        if let Some(t) = timer {
+            g.text(&t, R::new(x1 - 90.0, 36.0, 90.0, 24.0), 18.0, 700, if working { ORANGE } else { gfx::DIM }, Align::Right);
+        }
 
-        let br = R::new(x, 102.0, 108.0, 24.0);
-        widgets::chip(g, br, "Open Claude", None, ORANGE, gfx::WHITE, 11.0);
+        // row 2: recent answers + open
+        let br = R::new(x1 - 92.0, 92.0, 92.0, 24.0);
+        widgets::chip(g, br, "Open Claude", None, ORANGE, gfx::WHITE, 10.5);
         hits.add(br, Hit::ClaudeOpen);
+        if c.recent.is_empty() {
+            g.text("Answers you get today show up here", R::new(x0, 92.0, 220.0, 24.0), 10.0, 400, gfx::DIM, Align::Left);
+        } else {
+            let mut x = x0;
+            for (min, d) in c.recent.iter().rev().take(3) {
+                let label = format!("{} · {}", store::hhmm(*min), fmt_dur(*d));
+                let w = g.measure(&label, 9.5, 600) + 16.0;
+                if x + w > br.x - 6.0 {
+                    break;
+                }
+                widgets::chip(g, R::new(x, 95.0, w, 18.0), &label, None, gfx::CHIP, gfx::GRAY, 9.5);
+                x += w + 5.0;
+            }
+        }
     }
 
     /// State change reported by the watcher thread.
@@ -113,6 +131,7 @@ impl App {
         let now = Instant::now();
         if state == claude::ST_WORKING && prev != claude::ST_WORKING {
             self.claude.since = Some(now);
+            self.claude.started_at = Some(store::now().minute);
             self.claude.unseen = false;
             unsafe {
                 SetTimer(self.hwnd, T_SPIN, 70, None);
@@ -131,10 +150,15 @@ impl App {
                         self.claude.day = today;
                         self.claude.count = 0;
                         self.claude.total = Duration::ZERO;
+                        self.claude.recent.clear();
                     }
                     self.claude.count += 1;
                     self.claude.total += took;
                     self.claude.last = Some((now, took));
+                    self.claude.recent.push((store::now().minute, took));
+                    if self.claude.recent.len() > 20 {
+                        self.claude.recent.remove(0);
+                    }
                     let looking = claude::is_foreground();
                     self.claude.unseen = !looking;
                     if !looking && self.s.claude_popup {
