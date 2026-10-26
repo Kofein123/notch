@@ -131,6 +131,10 @@ Shot "hud-caps" ([int](60 * $s))
 [Mouse]::Key(0x14)
 Start-Sleep -Milliseconds 2200
 
+Stop-Process -Id $p.Id -Force
+Start-Sleep -Milliseconds 500
+$p = Start-Process -FilePath $Exe -PassThru
+[void][Mouse]::SetCursorPos(5, 600)
 Start-Sleep -Seconds 50
 Shot "pet" ([int](60 * $s))
 Start-Sleep -Milliseconds 2100
