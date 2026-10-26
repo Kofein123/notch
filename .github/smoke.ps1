@@ -73,6 +73,44 @@ for ($i = 1; $i -le 4; $i++) {
     Shot "page$i" ([int](150 * $s))
 }
 
+function IClick([double]$x, [double]$y) {
+    # island-local point (island left = canvas 70) of the expanded layout
+    [Mouse]::Click($r.L + [int]((70 + $x) * $s), $r.T + [int]($y * $s))
+}
+
+# to-do: Add Task, type a title, give it a time, save with Enter
+IClick 81 109
+Start-Sleep -Milliseconds 500
+[System.Windows.Forms.SendKeys]::SendWait("Buy milk")
+IClick 256 81
+Start-Sleep -Milliseconds 400
+Shot "todo-add" ([int](150 * $s))
+[System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+Start-Sleep -Milliseconds 500
+Shot "todo-saved" ([int](150 * $s))
+
+# pomodoro: go to page 1 and press play
+IClick 32 70
+Start-Sleep -Milliseconds 300
+IClick 32 70
+Start-Sleep -Milliseconds 300
+IClick 32 70
+Start-Sleep -Milliseconds 700
+IClick 265 109
+Start-Sleep -Milliseconds 1600
+Shot "pomo-running" ([int](150 * $s))
+
+# water: drink twice -> bottle (500 ml) empty -> refill alert
+IClick 398 70
+Start-Sleep -Milliseconds 700
+IClick 86 109
+Start-Sleep -Milliseconds 200
+IClick 86 109
+Start-Sleep -Milliseconds 900
+Shot "water-refill" ([int](150 * $s))
+IClick 320 39
+Start-Sleep -Milliseconds 900
+
 # leave, let it collapse, then Caps Lock HUD
 [void][Mouse]::SetCursorPos(5, 600)
 Start-Sleep -Milliseconds 1200
