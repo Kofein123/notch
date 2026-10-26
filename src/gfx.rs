@@ -110,7 +110,7 @@ pub struct Gfx {
     brush: ID2D1SolidColorBrush,
     round: ID2D1StrokeStyle,
     dash: ID2D1StrokeStyle,
-    formats: RefCell<HashMap<(u32, i32, bool), IDWriteTextFormat>>,
+    formats: RefCell<HashMap<(u32, i32, bool, bool), IDWriteTextFormat>>,
     text_family: Vec<u16>,
     icon_family: Vec<u16>,
     pub has_fluent: bool,
@@ -397,15 +397,13 @@ impl Gfx {
         }
     }
 
-    /// The island silhouette: flush with the top edge, rounded bottom corners
-    /// and concave "ears" that melt into the screen edge.
-    pub fn notch(&self, cx: f32, w: f32, h: f32, r: f32, ear: f32, c: Color) {
+    fn notch_path(&self, cx: f32, w: f32, h: f32, r: f32, ear: f32) -> Option<ID2D1PathGeometry> {
         let x0 = cx - w / 2.0;
         let x1 = cx + w / 2.0;
         let r = r.min(h - ear).min(w / 2.0).max(0.0);
         unsafe {
-            let Ok(path) = self.d2d.CreatePathGeometry() else { return };
-            let Ok(sink) = path.Open() else { return };
+            let path = self.d2d.CreatePathGeometry().ok()?;
+            let sink = path.Open().ok()?;
             sink.BeginFigure(pt(x0 - ear, 0.0), D2D1_FIGURE_BEGIN_FILLED);
             sink.AddLine(pt(x1 + ear, 0.0));
             sink.AddArc(&arc_seg(x1, ear, ear, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE));
@@ -416,8 +414,31 @@ impl Gfx {
             sink.AddLine(pt(x0, ear));
             sink.AddArc(&arc_seg(x0 - ear, 0.0, ear, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE));
             sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-            let _ = sink.Close();
-            self.rt.FillGeometry(&path, self.set(c), None);
+            sink.Close().ok()?;
+            Some(path)
+        }
+    }
+
+    /// The island silhouette: flush with the top edge, rounded bottom corners
+    /// and concave "ears" that melt into the screen edge.
+    pub fn notch(&self, cx: f32, w: f32, h: f32, r: f32, ear: f32, c: Color) {
+        let Some(path) = self.notch_path(cx, w, h, r, ear) else { return };
+        unsafe { self.rt.FillGeometry(&path, self.set(c), None) }
+    }
+
+    /// Vertical tint over the island: transparent at `y0`, `c` at the bottom.
+    pub fn notch_tint(&self, cx: f32, w: f32, h: f32, r: f32, ear: f32, y0: f32, c: Color) {
+        let Some(path) = self.notch_path(cx, w, h, r, ear) else { return };
+        let a = self.alpha;
+        let stops = [
+            D2D1_GRADIENT_STOP { position: 0.0, color: col(c.a(0.0)) },
+            D2D1_GRADIENT_STOP { position: 1.0, color: col(c.a(a)) },
+        ];
+        unsafe {
+            let Ok(coll) = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { return };
+            let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: pt(cx, y0), endPoint: pt(cx, h) };
+            let Ok(brush) = self.rt.CreateLinearGradientBrush(&props, None, &coll) else { return };
+            self.rt.FillGeometry(&path, &brush, None);
         }
     }
 
@@ -458,7 +479,11 @@ impl Gfx {
     // ---------------------------------------------------------------- text
 
     fn format(&self, size: f32, weight: i32, icon: bool) -> Option<IDWriteTextFormat> {
-        let key = ((size * 10.0) as u32, weight, icon);
+        self.format_ex(size, weight, icon, false)
+    }
+
+    fn format_ex(&self, size: f32, weight: i32, icon: bool, wrap: bool) -> Option<IDWriteTextFormat> {
+        let key = ((size * 10.0) as u32, weight, icon, wrap);
         if let Some(f) = self.formats.borrow().get(&key) {
             return Some(f.clone());
         }
@@ -476,6 +501,12 @@ impl Gfx {
                     w!(""),
                 )
                 .ok()?;
+            if wrap {
+                let _ = f.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+                let _ = f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+                self.formats.borrow_mut().insert(key, f.clone());
+                return Some(f);
+            }
             let _ = f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
             let _ = f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             if let Ok(sign) = self.dw.CreateEllipsisTrimmingSign(&f) {
@@ -507,6 +538,37 @@ impl Gfx {
                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
                 DWRITE_MEASURING_MODE_NATURAL,
             );
+        }
+    }
+
+    /// Multi-line text, top-aligned in `r`, wrapped at word boundaries.
+    pub fn text_wrap(&self, s: &str, r: R, size: f32, weight: i32, c: Color, align: Align) {
+        if s.is_empty() {
+            return;
+        }
+        let Some(f) = self.format_ex(size, weight, false, true) else { return };
+        unsafe {
+            let _ = f.SetTextAlignment(match align {
+                Align::Left => DWRITE_TEXT_ALIGNMENT_LEADING,
+                Align::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
+                Align::Right => DWRITE_TEXT_ALIGNMENT_TRAILING,
+            });
+            self.rt.DrawText(&wide(s), &f, &r.d2d(), self.set(c), D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+        }
+    }
+
+    /// Height of `s` wrapped to `width`.
+    pub fn measure_wrap(&self, s: &str, width: f32, size: f32, weight: i32) -> f32 {
+        let s = if s.is_empty() { " " } else { s };
+        let Some(f) = self.format_ex(size, weight, false, true) else { return size * 1.3 };
+        unsafe {
+            let Ok(layout) = self.dw.CreateTextLayout(&wide(s), &f, width, 4000.0) else { return size * 1.3 };
+            let mut m = DWRITE_TEXT_METRICS::default();
+            if layout.GetMetrics(&mut m).is_ok() {
+                m.height
+            } else {
+                size * 1.3
+            }
         }
     }
 

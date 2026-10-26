@@ -221,6 +221,12 @@ pub struct App {
     pub m: MediaInfo,
     art: Option<ID2D1Bitmap>,
     art_key: (u64, u64),
+    art_tint: Option<Color>,
+    tint_id: u64,
+    lyr: Spring,
+    track: String,
+    wide_shown: bool,
+    wheel_acc: i32,
     vol_mode: bool,
     seek_preview: Option<f64>,
     audio: sys::Audio,
@@ -306,6 +312,12 @@ impl App {
             m: MediaInfo::default(),
             art: None,
             art_key: (0, 0),
+            art_tint: None,
+            tint_id: 0,
+            lyr: Spring::new(0.0, 160.0, 0.0),
+            track: String::new(),
+            wide_shown: false,
+            wheel_acc: 0,
             vol_mode: false,
             seek_preview: None,
             audio: sys::Audio::new(),
@@ -457,13 +469,22 @@ impl App {
     fn layer_size(&self, l: Layer) -> (f32, f32, f32) {
         match l {
             Layer::Alert => (380.0, 78.0, 26.0),
-            Layer::Expanded => (420.0, 140.0, 30.0),
+            Layer::Expanded => (if self.wide_target() { 520.0 } else { 420.0 }, 140.0, 30.0),
             Layer::Hud => (250.0, 32.0, 14.0),
             Layer::Pill => {
                 let (w, h) = self.pill_size();
                 (w, h, if self.s.minimal { 12.0 } else { 13.0 })
             }
         }
+    }
+
+    /// Music page in the wide lyrics view (shape target).
+    fn wide_target(&self) -> bool {
+        self.page == P_MUSIC && self.s.lyrics_view && self.m.has
+    }
+
+    fn content_changing(&self) -> bool {
+        self.page != self.page_shown || self.wide_target() != self.wide_shown
     }
 
     fn target_shape(&self) -> (f32, f32, f32) {
@@ -480,10 +501,10 @@ impl App {
         if want != self.layer {
             self.fade.target = 0.0;
         }
-        if self.page != self.page_shown {
+        if self.content_changing() {
             self.page_fade.target = 0.0;
         }
-        let moving = self.sw.moving() || self.sh.moving() || self.sr.moving() || self.fade.v != self.fade.target || self.page_fade.v != self.page_fade.target || want != self.layer;
+        let moving = self.lyr.moving() || self.content_changing() || self.sw.moving() || self.sh.moving() || self.sr.moving() || self.fade.v != self.fade.target || self.page_fade.v != self.page_fade.target || want != self.layer;
         if moving && !self.anim_on {
             self.anim_on = true;
             self.last_anim = Instant::now();
@@ -502,6 +523,7 @@ impl App {
         moving |= self.sw.step(dt);
         moving |= self.sh.step(dt);
         moving |= self.sr.step(dt);
+        moving |= self.lyr.step(dt);
         let want = self.desired_layer();
         if want != self.layer {
             self.fade.target = 0.0;
@@ -514,17 +536,18 @@ impl App {
             self.fade.target = 1.0;
         }
         moving |= self.fade.step(dt);
-        if self.page != self.page_shown {
+        if self.content_changing() {
             self.page_fade.target = 0.0;
             if self.page_fade.v <= 0.0 {
                 self.page_shown = self.page;
+                self.wide_shown = self.wide_target();
                 self.page_fade.target = 1.0;
             }
         } else {
             self.page_fade.target = 1.0;
         }
         moving |= self.page_fade.step(dt);
-        moving |= want != self.layer || self.page != self.page_shown;
+        moving |= want != self.layer || self.content_changing();
         if !moving {
             self.anim_on = false;
             unsafe {
@@ -680,8 +703,28 @@ impl App {
         let (w, h, r) = (self.sw.v, self.sh.v, self.sr.v);
         g.alpha = 1.0;
         g.notch(CX, w, h, r, EAR, gfx::BLACK);
+        if let Some(tint) = self.art_tint {
+            let fade = crate::anim::ease_out(self.fade.v);
+            if self.layer == Layer::Expanded && self.wide_shown && self.page_shown == P_MUSIC {
+                g.alpha = fade * crate::anim::ease_out(self.page_fade.v);
+                g.notch_tint(CX, w, h, r, EAR, h * 0.3, tint.a(0.8));
+            } else if self.layer == Layer::Pill && self.m.playing && self.pill_lyric().is_some() {
+                g.alpha = fade;
+                g.notch_tint(CX, w, h, r, EAR, 0.0, tint.a(0.7));
+            }
+            g.alpha = 1.0;
+        }
 
-        let (lw, _, _) = self.layer_size(self.layer);
+        let lw = match self.layer {
+            Layer::Expanded => {
+                if self.wide_shown && self.page_shown == P_MUSIC {
+                    520.0
+                } else {
+                    420.0
+                }
+            }
+            l => self.layer_size(l).0,
+        };
         let ox = (CX - lw / 2.0).round();
         let mut hits = Hits { ox, on: self.fade.v > 0.5 && self.layer == self.desired_layer(), v: Vec::new() };
         hits.add(R::new(CX - w / 2.0 - ox, 0.0, w, h), Hit::Island);
@@ -753,11 +796,20 @@ impl App {
     fn draw_expanded(&self, g: &mut Gfx, hits: &mut Hits) {
         let base = g.alpha;
         let page = self.page_shown;
-        if page != P_MUSIC {
-            self.draw_header(g, page);
-        }
+        let wide = page == P_MUSIC && self.wide_shown;
         g.alpha = base * crate::anim::ease_out(self.page_fade.v);
-        let page_hits = self.page_fade.v > 0.5 && self.page == self.page_shown;
+        if wide {
+            let on = hits.on;
+            hits.on = on && self.page_fade.v > 0.5 && !self.content_changing();
+            self.draw_music_wide(g, hits);
+            hits.on = on;
+            g.alpha = base;
+            return;
+        }
+        g.alpha = base;
+        self.draw_header(g, page);
+        g.alpha = base * crate::anim::ease_out(self.page_fade.v);
+        let page_hits = self.page_fade.v > 0.5 && !self.content_changing();
         let on = hits.on;
         hits.on = on && page_hits;
         match page {
@@ -771,8 +823,10 @@ impl App {
         g.alpha = base;
         // arrows + dots
         if !self.editing() {
-            g.icon('\u{E76B}', 22.0, 70.0, 11.0, gfx::GRAY);
-            g.icon('\u{E76C}', 398.0, 70.0, 11.0, gfx::GRAY);
+            for (x, glyph) in [(22.0, '\u{E76B}'), (398.0, '\u{E76C}')] {
+                g.circle(x, 70.0, 10.0, gfx::CHIP_HI);
+                g.icon(glyph, x, 70.0, 8.5, gfx::WHITE);
+            }
             hits.add(R::new(8.0, 54.0, 28.0, 32.0), Hit::PrevPage);
             hits.add(R::new(384.0, 54.0, 28.0, 32.0), Hit::NextPage);
         }
@@ -791,6 +845,7 @@ impl App {
         let cy = 19.0;
         // left: title
         let (a, b, bc) = match page {
+            P_MUSIC => ("", "", gfx::WHITE),
             P_POMO => ("Pomodoro", "", gfx::WHITE),
             P_WATER => ("Water ", "Reminder", gfx::BLUE),
             P_SHELF => ("Shelf", "", gfx::WHITE),
@@ -962,10 +1017,47 @@ impl App {
         }
     }
 
+    /// Moves the lyrics scroll target to the current line.
+    fn follow_lyrics(&mut self) {
+        let Some(i) = self.m.lyric_index() else { return };
+        let t = i as f32;
+        if self.lyr.target != t {
+            if (t - self.lyr.v).abs() > 4.0 || !(self.expanded && self.wide_shown) {
+                self.lyr.snap(t);
+            } else {
+                self.lyr.set(t);
+                if !self.anim_on {
+                    self.anim_on = true;
+                    self.last_anim = Instant::now();
+                    unsafe {
+                        SetTimer(self.hwnd, T_ANIM, 16, None);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn on_wheel(&mut self, delta: i32) {
         if !self.expanded {
             return;
         }
+        // over the arrows, the page dots or the header row: the wheel flips pages
+        let (x, y) = self.cursor_logical();
+        let over_nav = matches!(self.find_hit(x, y), Some(Hit::PrevPage | Hit::NextPage | Hit::Page(_)))
+            || (y < 32.0 && self.island_rect().contains(x, y) && !self.wide_shown);
+        if over_nav && !self.editing() {
+            if (self.wheel_acc > 0) != (delta > 0) {
+                self.wheel_acc = 0;
+            }
+            self.wheel_acc += delta;
+            if self.wheel_acc.abs() >= 120 {
+                let next = self.wheel_acc < 0;
+                self.wheel_acc = 0;
+                self.set_page(if next { self.page + 1 } else { self.page + PAGES - 1 });
+            }
+            return;
+        }
+        self.wheel_acc = 0;
         let up = delta > 0;
         match self.page {
             P_MUSIC => {
@@ -1016,7 +1108,9 @@ impl App {
                 }
             }
             Hit::Lyrics => {
-                self.s.lyrics = !self.s.lyrics;
+                self.s.lyrics_view = !self.s.lyrics_view;
+                self.vol_mode = false;
+                self.lyr.snap(self.m.lyric_index().unwrap_or(0) as f32);
                 self.s.save();
                 self.kick();
             }
@@ -1140,6 +1234,16 @@ impl App {
             self.ensure_art(&g);
             self.gfx = Some(g);
         }
+        if self.m.art_id != self.tint_id {
+            self.tint_id = self.m.art_id;
+            self.art_tint = self.m.art.as_ref().and_then(|px| art_tint(px));
+        }
+        let track = format!("{}\u{1}{}", self.m.title, self.m.artist);
+        if track != self.track {
+            self.track = track;
+            self.lyr.snap(0.0);
+        }
+        self.follow_lyrics();
         if self.m.playing != was_playing {
             unsafe {
                 if self.m.playing {
@@ -1399,6 +1503,7 @@ impl App {
             }
             T_MEDIA => {
                 if self.m.playing {
+                    self.follow_lyrics();
                     // lyrics can change the pill width
                     let (w, _, _) = self.target_shape();
                     if (w - self.sw.target).abs() > 0.5 {
@@ -1519,4 +1624,40 @@ impl App {
         store::save_water(&self.water);
         store::save_shelf(&self.shelf);
     }
+}
+
+/// Accent colour for the lyrics gradient: saturation-weighted average of the
+/// artwork (premultiplied BGRA), normalised to a mid brightness.
+fn art_tint(px: &[u8]) -> Option<Color> {
+    let (mut r, mut g, mut b, mut wsum) = (0f32, 0f32, 0f32, 0f32);
+    let mut sat_sum = 0f32;
+    let mut n = 0f32;
+    for p in px.chunks_exact(4) {
+        let a = p[3] as f32 / 255.0;
+        if a < 0.5 {
+            continue;
+        }
+        let bb = p[0] as f32 / 255.0 / a;
+        let gg = p[1] as f32 / 255.0 / a;
+        let rr = p[2] as f32 / 255.0 / a;
+        let mx = rr.max(gg).max(bb);
+        let mn = rr.min(gg).min(bb);
+        let sat = if mx > 0.0 { (mx - mn) / mx } else { 0.0 };
+        let w = sat * sat * mx + 0.01;
+        r += rr * w;
+        g += gg * w;
+        b += bb * w;
+        wsum += w;
+        sat_sum += sat;
+        n += 1.0;
+    }
+    if wsum <= 0.0 || n == 0.0 {
+        return None;
+    }
+    let (r, g, b) = (r / wsum, g / wsum, b / wsum);
+    let mx = r.max(g).max(b).max(0.001);
+    // greyscale covers get a dim neutral tint
+    let target = if sat_sum / n < 0.08 { 0.28 } else { 0.62 };
+    let k = target / mx;
+    Some(Color((r * k).min(1.0), (g * k).min(1.0), (b * k).min(1.0), 1.0))
 }

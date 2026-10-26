@@ -100,6 +100,7 @@ pub struct Settings {
     pub fast_animations: bool,
     pub lyrics: bool,
     pub lyrics_in_pill: bool,
+    pub lyrics_view: bool,
     pub todo_start: bool,
     pub todo_end: bool,
     pub snooze: u32,
@@ -139,6 +140,7 @@ impl Default for Settings {
             fast_animations: false,
             lyrics: true,
             lyrics_in_pill: true,
+            lyrics_view: false,
             todo_start: true,
             todo_end: true,
             snooze: 10,
@@ -186,7 +188,7 @@ macro_rules! kv_fields {
 
 kv_fields!(
     autostart, size, minimal, mascot, sounds, hide_fullscreen, display, open_click, fast_animations,
-    lyrics, lyrics_in_pill, todo_start, todo_end, snooze, week_monday, focus, short_break, long_break,
+    lyrics, lyrics_in_pill, lyrics_view, todo_start, todo_end, snooze, week_monday, focus, short_break, long_break,
     water_on, water_goal, water_bottle, water_glass, water_from, water_until, hud_volume, hud_brightness,
     hud_caps, hud_language, popup_battery, popup_wifi, popup_bluetooth, notif_badge, shelf_clear, last_page,
 );
